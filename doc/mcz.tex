@@ -1,0 +1,608 @@
+% Fixes to make:
+% *a_zcB is conditioned on s already, need some notation for n(c,~s)?
+% * Use a prior from neighbors for some redshfit outlier rates?
+% * p_\alpha(B) = p_c(B) in redshifts leads to nothing?  3sDir?
+% * Sys(z^\prime) = Sys_r instead?
+
+
+% Paper on BFD implementation and testing
+\documentclass[11pt,preprint,flushrt]{aastex631}
+
+% For arXiv: \pdfoutput=1
+%\documentclass{emulateapj}
+\renewcommand{\topfraction}{0.8}
+\usepackage{natbib,graphicx,amsmath,subfigure,color}
+%\usepackage[draft]{todonotes}
+\def\eqq#1{Equation~(\ref{#1})}
+\newcommand\etal{{\it et al.\/}}
+%\newcommand\etal{{\it et al. }}
+\newcommand\eg{{\it e.g.\/}}
+\newcommand\ie{{\it i.e.\/}}
+\newcommand\etc{{\it etc.\/}}
+% Vectors: bold italic.  Matrices: bold roman.  Components: not bold
+\newcommand{\veca}{\mbox{\boldmath $a$}}
+\newcommand{\vecs}{\mbox{\boldmath $s$}}
+\newcommand{\vece}{\mbox{\boldmath $e$}}
+\newcommand{\vecd}{\mbox{\boldmath $d$}}
+\newcommand{\vecD}{\mbox{\boldmath $D$}}
+\newcommand{\vecF}{\mbox{\boldmath $F$}}
+\newcommand{\vecX}{\mbox{\boldmath $X$}}
+\newcommand{\vecg}{\mbox{\boldmath $g$}}
+\newcommand{\vecG}{\mbox{\boldmath $G$}}
+\newcommand{\vecM}{\mbox{\boldmath $M$}}
+\newcommand{\vecN}{\mbox{\boldmath $N$}}
+\newcommand{\vecQ}{\mbox{\boldmath $Q$}}
+\newcommand{\vecZ}{\mbox{\boldmath $Z$}}
+\newcommand{\vect}{\mbox{\boldmath $t$}}
+\newcommand{\vecx}{\mbox{\boldmath $x$}}
+\newcommand{\veck}{\mbox{\boldmath $k$}}
+\newcommand{\vecv}{\mbox{\boldmath $v$}}
+\newcommand{\vecu}{\mbox{\boldmath $u$}}
+\newcommand{\vecalpha}{\mbox{\boldmath $\alpha$}}
+\newcommand{\vectheta}{\mbox{\boldmath $\theta$}}
+\newcommand{\matR}{\mbox{$\bf R$}}
+\newcommand{\matC}{\mbox{$\bf C$}}
+\newcommand{\matB}{\mbox{$\bf B$}}
+\newcommand{\matA}{\mbox{$\bf A$}}
+\newcommand{\matI}{\mbox{$\bf I$}}
+\newcommand{\bnab}{\boldsymbol{\nabla}}
+\newcommand{\bnabg}{\boldsymbol{\nabla_g}}
+\newcommand{\Sg}{\mbox{${\bf S}_g$}}
+\newcommand{\likeli}{\mbox{$\mathcal{L}$}}
+\newcommand{\real}{\operatorname{Re}}
+\newcommand{\imag}{\operatorname{Im}}
+\newcommand{\photoz}{photo-$z$}
+%\newcommand\edit[1]{\textcolor{red}{#1}}
+%\newcommand\edit[1]{#1}
+\newcommand\answer[1]{\textcolor{violet}{#1}}
+\begin{document}
+
+%\slugcomment{early draft}
+
+%\keywords{gravitational lensing: weak---methods: data analysis}
+\title{$n(z)$ posterior sampling notes}
+
+\author{Gary\ldots}
+\email{garyb@physics.upenn.edu}
+\affil{Department of Physics \& Astronomy, University of Pennsylvania, 
+209 S.\ 33rd St., Philadelphia, PA 19104}
+
+%\begin{abstract}
+%We prescribe a method to construct a likelihood of obtaining a
+%\end{abstract}
+
+\section{Model definition}
+Our goal is to sample from the space of possible redshift distributions $n(z | B)$ giving the sky
+density $dn/dz$ for a ``wide'' sample of galaxies divided into bins
+$B$.  These functions will be subject to constraints from several
+observational resources:
+\begin{itemize}
+\item   A \textbf{deep} sample consists of galaxies with sufficient
+  photometric information to be definitively assigned to one of a set
+  of \textbf{phenotypes} indexed by $c,$ which in our application
+  correspond to cells in a self-organized map (SOM) created from
+  multi-band fluxes (``deep cells'').
+\item A \textbf{spectroscopic} sample, which are sources having
+  sufficient photometric information for definitive assignment to a
+  deep cell $c,$ and \emph{also} sufficient additional data $D$ to
+  derive a reliable probability $p(z | D)$ of the redshift.  This
+  might be $p(z|D) = \delta(z-z_{\rm spec})$ for a secure
+  spectroscopic redshift, or a finite-width or multimodal probability
+  for multiband photometric observations.  The spectroscopic sample
+  may overlap with the deep sample, but we will \emph{not} assume that
+  the spectroscopic sample is representative of the deep (or any
+  other) sample.
+\item The \textbf{wide} sample, covering our entire usable survey,
+  whose redshift distribution we wish to constrain.  Each wide galaxy
+  is assigned to a unique category $\hat c$ (a ``wide cell'') based on
+  its observed fluxes.  In our application, these are cells in another
+  SOM based on the survey bands.  Groups of the wide cells are merged
+  to form a smaller number of \emph{bins} indexed by $B.$
+  \textcolor{red}{We also need to designate one wide ``cell'' $\hat
+    c_{\bar s}$ for galaxies that are drawn from the deep sample but
+    are either undetected, or are detected but do not pass selection
+    cuts and are hence not in any of the wide SOM cells.  We can merge
+    these unusable galaxies with those in any wide cell $\hat c$ that
+    we choose to \emph{not} use in cosmological analyses into a common
+    bin $B_T$, the ``trash bin,'' (a.k.a.\ ``compost'' or ``garbage''
+    bin).  When we sum over bins $B$ we will include the compost bin,
+    unless noted otherwise.}
+\item The cross-correlation or \textbf{WF} data measure the angular
+  cross-correlation $w_{Br}$ between the wide-survey members of some
+  bin $B$ and a set of reference samples $r$ having well-constrained $n(z).$
+\end{itemize}
+
+The underlying idea of our SOMPZ process is that we are reweighting
+the spectroscopic sample to match the wide sample, as (first?)
+proposed by Lima et al. (2008).  In any reweighting process, 
+we must first decide what set of
+characteristics $x$ of a galaxy suffice to insure that all galaxies
+satisfying conditions $x$ are drawn from the same $n(z)$.  If this is true we
+can posit that any spectroscopic measurement of a galaxy in $x$ is
+drawn from $p(z|x),$ and hence its $p(z|D)$ is an unbiased sample from $p(z|x).$
+Making the conditions $x$ more restrictive makes it more likely that
+we are isolating galaxies with identical $p(z)$'s---but slicing the
+spectroscopic sample into smaller groups leaves us with weaker
+constraints on each $p(z|x).$    On the other hand, a coarser set of
+$x$ categories runs the risk that our spectroscopic sample is not
+truly a representative sample of $x.$
+
+The finest $x$ division would be to let each source in the deep field
+be its own $x,$ but we clearly don't have enough spectroscopy to use
+this.  A too-coarse division might be to use the wide-field bins, $x=B$.
+In between these two are, in order of increasing specificity,
+$x=c,$ $x=(c,B),$ and $x=(c,\hat c).$  In DES Y3, simulations showed
+that $x=c$ was potentially too coarse, and using $x=(c,B)$ was as good
+as using $x=(c,\hat c).$   We will move ahead with this ``bin
+conditionalization'' approach.
+
+Our task, therefore, is to sample from the possible functions
+$n(z|c,B)=p(z|c,B) n(c,B)$ that are consistent with the four sources
+of data listed above.
+
+We will model the $n(z)$ for any particular sample as a linear sum
+\begin{equation}
+  n(z) = \sum_i a_i K_i(z),
+\end{equation}
+where $a_i$ are unknown coefficients of predetermined functions $K_i.$
+In DES Y3, the $K_i$ were chosen to be boxcar functions of equal width
+$\Delta z$:
+\begin{align}
+  K_i(z) & = \Pi\left(\frac{z}{\Delta z}-i\right), \\
+  \Pi(u) & = \begin{cases}
+    1 & 0<u<1 \\
+    0 & \text{otherwise.}
+  \end{cases}
+\end{align}
+This gives the piecewise-constant $n(z)$ that has problems because it
+does not have $n(z)\rightarrow 0$ as $z\rightarrow0,$ and is also ugly
+because it's discontinuous.  We can instead construct a
+piecewise-linear $n(z)$ using
+\begin{align}
+  K_i(z) & = \Lambda\left(\frac{z}{\Delta z}-i\right), \\
+  \Lambda(u) & = \begin{cases}
+    u & 0<u<1 \\
+    2-u & 1<u<2 \\
+    0 & \text{otherwise.}
+  \end{cases}
+\end{align}
+Both the boxcar and sawtooth functions have the nice feature that
+$n(z)$ is non-negative if and only if the $a_i$ are non-negative.  A
+smoother $n(z),$ which is quadratic as $z\rightarrow 0$ like the real
+universe should be, and would have continuous first derivatives, would
+use
+\begin{align}
+  K_i(z) & = Q\left(\frac{z}{\Delta z}-i\right), \\
+  Q(u) & = \begin{cases}
+    u^2/2 & 0<u<1 \\
+    3/4 - \left(u-3/2\right)^2 & 1<u<2 \\
+    (3-u)^2/2  & 2<u<3 \\
+    0 & \text{otherwise.}
+  \end{cases}
+\end{align}
+With the quadratic kernel, it is still true that $\{a_i\}\ge 0
+\Rightarrow n(z) \ge 0.$  But the converse is not true---there are
+non-negative $n(z)$ functions that can be created with some $a_i<0.$
+
+In any case we can proceed with the model that
+\begin{equation}
+  n(z^\prime | c, B) = \sum_z a_{zcB} K_z(z^\prime),
+  \label{azcB}
+\end{equation}
+where we now use $z$ as a discrete index over the coefficients.  Our
+technique will be to derive the posterior distribution on the
+parameter vector
+$\veca=\{a_{zcB}\}$ conditional on the observations.  Then from each sample,
+\begin{equation}
+  n(z^\prime | B) = \sum_c a_{zcB}  K_z(z^\prime).
+\end{equation}
+
+\section{Constraints}
+The posterior distribution of $\veca$ is
+\begin{equation}
+  p(\veca | D) \propto Pr(\veca) \prod_i p(D_i | \veca),
+  \label{posterior}
+\end{equation}
+where $Pr$ is a prior and $D=\{D_w, D_d, D_s,D_{wz}\}$ is the
+amalgamation of the observations of wide, deep, and spectroscopic
+samples, and the WZ data.  We can now derive these likelihood terms
+under the product.
+
+\subsection{Deep counts}
+The deep galaxies can each be assigned a $c$ value, leading to counts
+$M_c$ of such galaxies in the deep survey area $A_d$.  These are assumed to be randomly drawn from a Cox process,
+which is a Poisson distribution modulated by some fluctuations
+$\Delta^d_z$ in the galaxy density under each redshift kernel $K_z$:
+\begin{align}
+M_c & \sim {\rm Poisson}\left[A_d \sum_{z,B} a_{zcB} (1+\Delta^d_z)\right] \\
+\Rightarrow \quad p(D_d | \veca, \{\Delta^d_z\})& \propto
+  Pr(\{\Delta_z^d\})
+  \exp\left[-A_d \sum_{z,B} a_{zcB} (1+\Delta^d_z)\right]
+  \prod_c  \left[\frac{A_d}{M_c!} \sum_{z,B} a_{zcB} (1+\Delta^d_z)\right]^{M_c}
+  \\
+\nonumber
+  \Rightarrow \quad -\log p(D_d | \veca, \{\Delta^d_z\}) & = A_d \sum_{zcB}  a_{zcB}
+                                          (1+\Delta^d_z) - \sum_c M_c
+                                           \log\left[\sum_{z,B}
+                                           a_{zcB}
+                                           (1+\Delta^d_z)\right] \\
+   & \phantom{=} - \log  Pr(\{\Delta_z^d\}) + 
+                                           \text{const}.
+\label{deeplike}
+\end{align}
+As in the 3sDir sampling method by S\'anchez \etal\ (2020), a
+covariance matrix for the $\Delta$ values can be derived from a
+nominal power spectrum for the mass fluctuations.  Since 
+each redshift shell of the deep fields is large, $O(100\,{\rm Mpc}),$
+we can assume a normal distribution for the overdensities.  There will
+be some bias factor $b^2$ between the computed mass covariance and the
+galaxy covariance matrix $C_\Delta;$ we could allow this to be a free
+parameter, or even assign different biases to different subsects of
+$c$, but for now we will hold it constant, so that
+\begin{align}
+  \{\Delta^d_z\} & \sim {\mathcal N}(0, C_d) \\
+  \Rightarrow \quad -\log Pr(\Delta^d) & = \frac{1}{2}
+                                          \{\Delta^d_z\}^T C_d^{-1}
+                                          \{\Delta^d_z\}  +
+                                          \text{const}.
+\end{align}
+
+\subsection{Wide counts}
+Each wide galaxy is assigned to some cell $\hat c$ and hence we can
+accumulate the counts $M_{\hat c}$ in each wide cell.  A model for
+these requires that we know the \textbf{transfer function} $f_{\hat
+  c}^c = p(\hat c | c)$ giving the probability that a galaxy in deep
+cell $c$ will be placed in $\hat c$ after being observed with the
+noise levels in the wide survey.  Note that this function will depend
+on observing conditions, but to start with we will assume that we have
+the values area-averaged over the wide footprint, in which case it
+will be true that
+\begin{equation}
+  \langle M_{\hat c} \rangle = A_w \sum_{cz} f^c_{\hat c} a_{zcB}.
+\end{equation}
+There is no summation over $B$ since it is determine by $\hat
+c.$\footnote{\textcolor{red}
+{The deselection ``cell''  $\hat c_{\bar s}$ has an $f^c_{\hat c}$
+  too, but we do not have an observable number of counts for it so it
+  cannot be used for constraints.  It might be useful in this case to
+  have two compost bins, one for the undetected/unselected sources,
+  and one for galaxies in wide cells $\hat c$ which we measure but do
+  not use.  This might offer a more informative constraint.}}  We
+could add the mean density fluctuations to the expected density as we
+did for the deep counts, but since it is the distribution of
+the realization of galaxies in the wide field that we want for our
+analyses, not a universal average, these factors should properly be
+absorbed into the $a_{zcB}.$
+
+Furthermore the area of the wide survey is large enough that the
+Poisson fluctuations in the wide-cell densities and the density fluctuations
+will be small---there are $\approx 10^8$ wide galaxies distributed
+over $\approx 10^3$ wide SOM cells.  Instead of treating the wide
+counts as a probability distribution, we could consider this a fixed
+constraint:
+\begin{equation}
+ M_{\hat c} = A_w \sum_{cz} f^c_{\hat c} a_{zcB}.
+\label{wideconstraint}
+\end{equation}
+The values of the $f^c_{\hat c}$ are taken to be exactly known because
+each deep galaxy has been injected into the wide survey and assigned
+to a $\hat c$ many times in the Balrog process, making the statistical
+errors in the transfer function well below statistical uncertainties
+from other observational constraints.  The total selection rate
+$\sum_{\hat c} f^c_{\hat c}$ can be anywhere between 0 and 1 for a
+given $c$.
+
+\subsection{Spectroscopic data}
+Each spectroscopic measurement $\alpha$ is considered an independent random
+draw from $p(z|c_\alpha,B)$ for the deep cell assignment of galaxy
+$\alpha,$ conditional on the bin assignment.  The spectroscopic or multi-band analysis of the data
+$D_\alpha$ for that source yield a distribution $p(z_\alpha |
+D_\alpha),$ and since such estimates are nearly always made with a
+uniform prior on $z_\alpha,$ we have $p(D_\alpha | z_\alpha) \propto p(z_\alpha |
+D_\alpha)$ and we can use them interchangeably.
+
+We also will need to know the probability $f^\alpha_B \equiv p_\alpha(B)$ that deep
+galaxy $\alpha$ would end up in bin $B$ when it appears in the wide
+survey.  These values\textcolor{red}{will sum to unity if we include
+  the compost bin.}
+\begin{align}
+  p(D_\alpha |\veca, \{\Delta^s_z\}) & = \int dz_\alpha p(D_\alpha| z_\alpha)
+                           p(z_\alpha | \veca, \{\Delta^s_z\}) \\
+  & \propto \int dz_\alpha p(z_\alpha| D_\alpha) \frac{ \sum_B
+    n(z_\alpha|c_\alpha,B) p_\alpha(B)} { \int dz^\prime \sum_B  n(z^\prime |
+    c_\alpha,B) p_\alpha(B)} \\
+  & = \frac{ \sum_{Bz} f^\alpha_z a_{zc_\alpha B} (1+\Delta^s_z)
+    f^\alpha_B}{\sum_{Bz} a_{zc_\alpha B} (1+\Delta^s_z) f^\alpha_B}, \\
+  f^\alpha_z & \equiv \int dz_\alpha p(z_\alpha | D_\alpha)
+               K_z(z^\prime).
+\end{align}
+The last line assumes that we have normalized our $n(z)$ kernel
+elements such that $\int dz K_i(z)=1.$  We have introduced galaxy
+density fluctuations $\Delta^s_z$ averaged over the spectroscopic
+survey area as nuisance parameters, and $f_z^\alpha$ encapsulates the
+redshift measurement results for galaxy $\alpha.$
+
+If we again approximate the joint distribution of the $\Delta^s_z$ as
+a multivariate normal with covariance matrix $C_s,$ then the
+likelihood term for the spectroscopic data becomes
+\begin{align}
+  \nonumber
+- \log  p(D_s | \veca, s, \{\Delta^s_z\}) & = -\sum_\alpha \log\left[  \sum_{Bz}
+                        f^\alpha_z a_{zc_\alpha B} (1+\Delta^s_z)  f^\alpha_B
+                        \right]  +\sum_\alpha \log\left[\sum_{Bz} a_{zc_\alpha B}
+     (1+\Delta^s_z) f^\alpha_B\right] \\
+     & \phantom{=} +  \frac{1}{2}
+                                         \{\Delta^s_z\}^T C_s^{-1}
+                                         \{\Delta^s_z\}  +
+                                         \text{const}.
+       \label{speclike}
+\end{align}
+
+If the spectroscopic and deeps field regions overlap, there will be
+covariance between $\Delta^s$ and $\Delta^d,$ so we will need to make
+a joint prior with a covariance matrix $C_{ds}$ that subsumes the
+$C_s$ and $C_d$ terms at the ends of Equations~(\ref{deeplike}) and (\ref{speclike}).
+
+\subsection{Clustering likelihood}
+Following Gatti et al. (2022) from Y3,  the observed
+cross-correlation coefficients $w_{Br}$ between galaxies in bin $B$
+and reference samples indexed by $r$ centered at redshifts $z_r$ is
+modeled as
+\begin{align}
+\label{wzmodel}
+  \hat w_{Br} & = \int dz^\prime f(z^\prime|B) p_r(z^\prime) b_r w_{\rm
+                DM}(z^\prime) {\rm Sys}(z^\prime, \vecs_B) \\
+\nonumber 
+   & \phantom{=} + \alpha_r \int_0^{z_r} dz^\prime f(z^\prime|B)
+     b_B(z^\prime) D(z^\prime, z_r) \\
+\nonumber 
+   & \phantom{=} + b_r \int_{z_r}^\infty dz^\prime f(z^\prime|B)
+     \alpha_B(z^\prime) D(z_r,z^\prime) \\
+  f(z^\prime|B) & \equiv \frac{n(z^\prime|B)}{\int
+    dz^{\prime\prime} n(z^{\prime\prime} | B)} = \frac{ \sum_c
+                  a_{zcB}K_z(z^{\prime})}{\sum_c a_{zcB}}
+                  \label{fzB}
+\end{align}
+The first line of the expression is a simple scale-independent,
+linear-bias model for the expected angular clustering, multiplied by a
+mild function of $z$ parameterized by some values of $\vecs$ that are
+left free to vary.  This ${\rm Sys}(z)$ function is meant to absorb
+the failures of the linear-bias model and our uncertainties in the
+redshift dependence of the bias of galaxies in $B$, and a prior on
+$\vecs$ expresses our estimate of the size and redshift variability of
+these corrections to the model.  The clustering of
+matter, $w_{\rm DM},$ is estimated from a reference cosmological
+model---any deviation of the true cosmology from this reference
+cosmology is absorbed into the Sys function.
+
+The second line models angular correlations
+caused by magnification of reference galaxies at $z_b$ by mass
+associated with source galaxies in bin $B$ at redshift $z^\prime.$
+The third line is the term from magnification of the lensing sources at
+$z^\prime>z_b.$  The function $D(z_{\rm lens},z_{\rm src})$ includes
+cosmological and geometric factors along with the power spectrum of
+matter fluctuations.  We have assumed in these terms that $n_r(z)$ is
+narrow and centered at $z_r,$ with bias $b_r$ and magnification
+coefficient $\alpha_r$ being constant over this range.  For the
+sources, we have at least a free bias parameter $b_B$ and
+magnification coefficient $\alpha_B,$ that most generally might be
+functions of $z.$  Image simulations will give Gaussian priors on the
+$\alpha$ values.
+
+Under the (reasonable) assumption that the Sys function varies weakly
+across any given redshift kernel $K_z(z^\prime),$ and similarly 
+we can replace the functions $b_B(z^\prime), \alpha_B(z^\prime),$ and
+$D(z^\prime,r)$ with constants $b_{Bz}, \alpha_{Bz},$ and $D_{zr},$
+then can remove all the $z^\prime$ integrations in (\ref{wzmodel})
+with summations over our coefficients.
+\begin{align}
+\label{wzsum}
+  \hat w_{Br} & = \frac{1}{\sum_c a_{zcB}} \sum_{zc} a_{zcB} \left[  W_{zr}\, {\rm Sys}(z,\vecs_B) 
+ + \alpha_r b_{Bz} D_{zr} + \alpha_{Bz} b_r D_{rz}\right] \\
+W_{zr} & \equiv \int dz^\prime K_z(z^\prime) p_r(z^\prime) b_r w_{\rm
+         DM}(z^\prime).
+         \label{Wzr}
+\end{align}
+In the above we have absorbed into $D_{zr}$ the condition that $z<z_r$
+by setting the $z>z_r$ elements to zero.
+
+The likelihood $p(D_{wz} | \veca)$ becomes
+\begin{align} 
+\label{wzsum}
+-\log p(D_{wz} | \veca, \ldots) & = \frac{1}{2} ({\bf w} - \hat{\bf w})^T (C^{wz})^{-1}
+                          ({\bf w} - \hat{\bf w}) + \text{const} \\
+  \nonumber & \phantom{=} -\log Pr(\{\alpha_r\}) - \log
+              Pr(\{\alpha_{Bz}\}) -  \log Pr(\{b_r\}) - \log
+              Pr(\{b_{Bz}\})  \\
+  \nonumber & \phantom{=} -  \sum_B \log Pr(\vecs_B) .
+\end{align}
+where we have known covariance for the measurements ${\bf w} =
+\{w_{Br}\},$ and the model $\hat {\bf w}$ is dependent on the
+$a_{zcB}$ parameters and the WZ nuisance parameters as in
+Equations~(\ref{wzsum}) and (\ref{Wzr}).  We note that the log posterior is
+quadratic in the bias and magnification values $\alpha_{Bz}$ and
+$b_{Bz}$, and also in the $\vecs_B$ if the Sys function is linear in
+  them and they have a Gaussian prior.  Hence we could marginalize
+  over these analytically (for fixed $\veca, \alpha_r,$ and $b_r$)
+  rather than sampling over them.
+
+\section{Summary}
+The \textbf{data} provided to the calculation are:
+\begin{itemize}
+  \item The deep counts in SOM cells $M_c$ and the area $A_d$ with
+    which they are associated.
+  \item The wide counts in SOM cells $M_{\hat c}$ and the area $A_w$
+    with which they are associated.
+  \item The spectroscopic likelihoods $p(z_\alpha | D_\alpha)$ and
+    deep-cell assignments $c_\alpha$ of all the targets of the
+    spectroscopic sample.
+  \item The WZ angular correlations $w_{Br}$ against reference
+    samples, and the covariance matrix $C^{wz}$ for them.
+  \end{itemize}
+
+The \textbf{free parameters} of the model are:
+\begin{itemize}
+  \item The conditional sky densities $\veca = \{a_{zcB}\}$.  If there
+    are 4 bins, $64\times64=4096$ deep SOM cells, and $\approx50$
+    redshift bins, this is a maximum of 800k parameters.  We expect,
+    however, for this matrix to be sparse, in that a given $c$ might
+    produce sources $<4$ bins, and be constrained to be non-zero in
+    only a small fraction of the redshift bins, leaving $<1e5$ free
+    parameters to sample.  The wide-SOM occupancy constraint in
+    Equation~(\ref{wideconstraint}) will project away $\approx10^3$ of
+    them.
+  \item The remaining parameters are nuisances.  First are the
+    overdensities $\Delta^d$ and $\Delta^s$ of the deep and
+    spectroscopic fields, $\approx100$ total free parameters.
+  \item The bias factors $b_{B}$ and Sys-function coefficients
+    $\vecs_B$ will be $\approx 5$ free parameters per bin, or $\approx
+    20$ total, along with magnification coefficients $\alpha_r$ for
+    each reference set ($\approx 100$) and source bin (4) are free in
+    the model $\hat w_{zr}.$
+\end{itemize}
+  
+The \textbf{calculated inputs} to the model are:
+\begin{itemize}
+  \item The transfer function matrix $f^c_{\hat c}$ derived from
+    Balrog injections or other means.
+  \item The bin probabilities $p_\alpha(B)$ of each spectroscopic
+    galaxy's assignment into bins, again estimated from Balrog
+    injections of that source.
+  \item The covariance matrix $C^{ds}$ of the $\Delta^s$ and
+    $\Delta^d$ overdensities, for their joint multivariate normal
+    distribution. 
+  \item The effective areas $A_d$ and $A_s$ of the deep and
+    spectroscopic surveys.
+  \item The dark matter clustering $w_{DM}(z)$ and prefactors
+    $D(z,z^\prime)$ for magnification signals in a nominal
+    cosmological model.
+  \item Means and variances for Gaussian priors on $\alpha_r$ and $\alpha_B$ derived from
+    magnification tests in Balrog or other means.
+  \item The biases $b_r$ derived from autocorrelations of the
+    reference populations via the nominal cosmology.
+  \item Means on the source biases $b_B$ and the variances for
+    Gaussian priors on these and each individual $\vecs_B$ element.
+\end{itemize}
+  
+In addition we must posit a \textbf{prior on \veca}, included which
+elements to fix to zero.  This prior will control the $n(z)$ assigned
+to cells that are deficient in spectroscopic data, and will control
+the uncertainties ascribed to rare redshift outliers within deep
+cells.
+
+The total posterior probability on $\veca$ and the implied $n(z|B)$
+functions is then defined by this prior on 
+$\veca,$ along with the data likelihoods given in
+Equations~(\ref{deeplike}),
+(\ref{speclike}), and (\ref{wzlike}), with the contraint
+(\ref{wideconstraint}).  The individual terms of the likelihood are
+algebraically simple to calculate and differentiate, and highly
+amenable to pipelined calculations.  The challenge is
+to efficiently sample the large $\veca$ space using these derivatives.
+
+
+\section{Questions}
+\begin{enumerate}
+  \item In equation 5 the sawtooth function appears to have a potential
+    typo. Should it be $2-u$ when $1<u<2$?
+
+    \answer{Yes! Fixed.}
+
+\item Regarding equation 12, I’m curious why $\Delta^d_z$ isn’t integrated
+over. My understanding is that this prior might require
+integration. However, if integrated, it seems equation 13 couldn’t be
+easily derived…
+
+For the Deep count, since Deltas are normal distributions, shouldn't the equations 12-13 be marginalised over it ?
+
+\answer{Correct, the final probability will need to be marginalized
+  over the $\Delta$ values.  My assumption is that the $\Delta$ values are all nuisance
+  parameters that will be sampled along with the $\veca$ values.  I
+  have noted now that these probabilities are also conditional on
+  $\Delta$.}
+
+\answer{The $A_d$ would correspond to the total area of the sky over
+  which the deep galaxies are collected.  The calculation of the
+  Gaussian prior on $\Delta^d_z$ would need to account for the
+  geometry of these fields.  The $A_s, \Delta^s_z$ are more complicated because the
+  spectra come from a variety of geometries; I'm ignoring that for now.}
+
+\item In the same section, do we have only one deep survey ? (and one Ad)
+
+  As a clarification, $A_w$ and $A_d$ are effective area that takes number
+density into account. By equation 16, does this imply a reweighting of
+deep galaxies to wide without altering the total galaxy count?
+
+\answer{I'm not sure what you mean by ``takes number density into
+  account.'' The $a$ values will be in units of galaxies per unit
+  area.  They represent a mean value over density fluctuations.  It
+  may be true that $\sum_{\hat c} f^c_{\hat c} < 1$ if the galaxies in
+  $c$ are not all detected in the wide survey, so the total wide
+  counts do not add up to total deep counts in a fixed area.}
+
+\item minor comment, eq 10 should be summed over z as well right ?
+  
+\answer{Do you mean a different equation number??}
+
+
+\item For the Wide counts, the transfer function take into account the
+selection right? hence the use of Balrog. (so if I understand
+rigorously eq 16-17 it is $M_c|s$ and f is conditionalised by s as well
+.? )
+
+\answer{Since a galaxy that is assigned to a $\hat c$ is already
+  selected, the counts $M_{\hat c}$ are already conditioned on
+  selection, and the $f^c_{\hat c}$ are too.}
+
+\item Eq 16-17, shouldn't it be $A_w/A_d$ as a prefactor ? Maybe this
+  depends on the definition of f...
+
+\answer{As noted above, the $a$ values are in units of galaxies per
+  unit area, so to predict the galaxy counts we will multiply by the
+  appropriate $A$ for each survey component.}
+  
+\item Is the spectroscopic data section detailed in some of your articles ?
+  I don't understand eq 18--21
+
+  \answer{I don't know if we wrote anything like this in the SOMPZ
+    papers.  I see that there are some mistakes here though (which
+    I've fixed above).  The $p(D_\alpha, z_\alpha)$ should be
+    $p(D_\alpha | z_\alpha)$ which is $\propto p(z_\alpha | D_\alpha)$
+    because the people analyzing the spectro sample have assumed a
+    uniform prior on $z$ when estimating their probabilities.}
+
+\answer{Also I have put in now the dependence of $p(z_\alpha)$ on the
+  $\veca$ that are determining $n(z)$.  At eqn (19), note that
+  conditioning on $s$ is the same as summing over $B$ because a
+  selected source must end up in one of the bins $B$.}
+
+\item Why is selection effect important for the spectroscopic part, but not
+for the Deep counts ? Many  deep galaxies will not be selected in the
+wide right ?
+
+\answer{For the deep counts, there is no selection, there is no
+  selection; we are assuming that we are getting every galaxy in the
+  deep fields which has any chance of being selected in the wide
+  survey.  When we do the spectro fields, we are conditioning on the
+  bin membership (which implies a selection).}
+
+\item Eq 18, shouldn't it be $p(D|z)$ ?
+
+  \answer{Yes---I think I fixed the place this should be?}
+
+\item why is p(z|s) not conditionalised by a in 18 ? (is there a physical
+  reason to drop conditionalisation for $p(D|z)$ ?)
+
+  \answer{Yes, it is conditioned in $a$, I put this in.}
+
+\item I don't understand how you go to line 19, with the c variable,
+  and why it becomes $c_\alpha$ in 20
+
+  \answer{Should be a $c_\alpha$ in line (19) too---I am assuming here
+    that we know exactly which deep-SOM bin every spectro galaxy
+    belongs to.}
+  
+\end{enumerate}
+
+\end{document}
+                  
