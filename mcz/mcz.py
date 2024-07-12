@@ -17,6 +17,21 @@ class Qlna:
         self.dlna = dlna
         self.nz = nz
 
+    def __call__(self,k,z):
+        '''Evaluate dn/dz for the kernel with index k at an array of
+        z values.'''
+        # Doing duplicative calculations to make this compatible
+        # with JAX arithmetic.
+        lna = jnp.log(1+z)
+        index = jnp.floor(lna/self.dlna).astype(int)
+        phase = lna/self.dlna - index
+        kvals = jnp.stack( (0.5*phase*phase,
+                            0.75 - (phase-0.5)*(phase-0.5),
+                            0.5*(1-phase)*(1-phase)), axis=-1)
+        mask = jnp.stack( (index==k, index==k+1, index==k+2), axis=-1)
+        return jnp.sum( kvals * mask, axis=-1) / (1+z)
+        
+
     def kvals(self, z):
         '''Evaluate the kernels' dn/dz at an array of z values.
         Returns two JAX arrays (on default device):
