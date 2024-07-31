@@ -2,7 +2,8 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
-
+from scipy.interpolate import CubicSpline
+from scipy.special import eval_legendre
 
 class Qlna:
     def __init__(self, dlna, nz):
@@ -29,8 +30,13 @@ class Qlna:
                             0.75 - (phase-0.5)*(phase-0.5),
                             0.5*(1-phase)*(1-phase)), axis=-1)
         mask = jnp.stack( (index==k, index==k+1, index==k+2), axis=-1)
-        return jnp.sum( kvals * mask, axis=-1) / (1+z)
+        return jnp.sum( kvals * mask, axis=-1) / (1+z) / self.dlna
         
+    def zbounds(self):
+        '''Return lower, upper bounds in z of all the bins in (nz,2) array'''
+        zmin = np.exp(np.arange(self.nz)*self.dlna) - 1
+        zmax = np.exp(np.arange(3,self.nz+3)*self.dlna) - 1
+        return np.stack( (zmin, zmax), axis=1)
 
     def kvals(self, z):
         '''Evaluate the kernels' dn/dz at an array of z values.
@@ -51,7 +57,7 @@ class Qlna:
         # And add the factor of (1+z) that makes it a dn/dz 
         mask1 = jnp.stack( (index>=0, index-1>=0, index-2>=0), axis=-1 )
         mask2 = jnp.stack( (index<self.nz, index-1<self.nz, index-2<self.nz), axis=-1)
-        kvals = kvals * mask1 * mask2 / (1+z)[:,jnp.newaxis]
+        kvals = kvals * mask1 * mask2 / (1+z)[:,jnp.newaxis] / self.dlna
 
         return index, kvals
 
@@ -90,105 +96,148 @@ def logpspec(psz, psB, cs, a, Delta_s):
     ps = ps / jnp.einsum('zB,z,sb->s',a[:,cs,:],1+Delta_s,pzB)
     return jnp.sum(jnp.log(ps))
 
-def wzhat(a, W, sys, alpha_r, alpha_Bz, b_r, b_Bz, D_zr, D_rz):
-    '''Return predicted w_Br values for pairs of source bin and reference bin.
-    `a`   are the a_zcB coefficients
-    `W`   are the reference clustering terms at z,r
-    `sys` are the systematic functions of z,B
-    `alpha` are the magnification values of reference and sources
-    `b`   are teh bias values of ref and source pops
-`    `D_zr, D_rz` are requisite magnification distance factors. They are
-          transposes in the sense that the are the same function evaluated
-          with redshifts of z bins and reference bins swapped, but since
-          these are sampled at different z's, the matrices are not transposes
-          of each other.
-    Returns an array of shape (nB, nr)'''
-    out = jnp.einsum('zcB,zr,zB->Br',a,W,sys) \
-          + jnp.einsum('zcB,r,Bz,zr->Br',a,b_r, alpha_Bz, D_zr) \
-          + jnp.einsum('zcB,Bz,r,rz->Br',a,b_Bz, alpha_r, D_rz)
-    return out / jnp.sum(a, axis=1)  # Sum over c axis
-
-def logpw(wdata, what, invcovw):
-    '''Return log of (Gaussian) likelihood of observed w given theory and
-    its covariance'''
-    dw = wdata - what
-    return -0.5 * jnp.einsum('Br,BrBr,Br->',dw,invcovw,dw)
-
-
 
 ##################################################################
 ### Routines for evaluating the w(z) probability.
 ### Going to aim on doing all the repeated calculations with JAX.
 ##################################################################
 
-def wz_prep_integrals(kernels, z_r, dndz_r, b_r, dz_u, w_dm, cda,
-                      z_max=5., omega_m_c2=0.15):
-    '''Calculate integrals of dark-matter angular clustering and
+def sys_basis(zr0, dzr, Nr,
+              Nk):
+    '''Create a matrix of shape (Nk, Nr) giving the value of the Sys(z_r) basis functions
+    at each reference redshift r.
+    Arguments:
+    `zr0, dzr`:  Central redshift of first reference bin and increment between them
+    `Nr`:        Number of reference bins
+    `Nk`:        Number of terms (order) of the systematic error function S_k(r)
+    Returns:
+    `Sys_kr`:    JAX device array of systematic-adjustment terms.'''
+
+    zr = zr0 + np.arange(Nr)*dzr
+    # Rescale redshifts to central 85% of the range [-1,1]
+    zmean = 0.5*(zr[-1]+zr[0])
+    zspan = Nr*dzr
+    u = 0.85 * ( 2*(zr-zmean) / zspan)
+
+    # Scaling coefficient for Legendre polynomials:
+    ak = np.sqrt(2*np.arange(Nk)+1) / 0.85
+
+    # Build coeffs from Legendre
+    out = np.array( [ak[k] * eval_legendre(k, u) for k in range(Nk)] )
+
+    return jnp.array(out)
+
+def prep_wz_integrals(kernels,
+                     zr0, dzr, Nzr,
+                     cda, c_over_H, wdm,
+                     oversample_r=6,
+                     Omega_m=0.26):
+    r'''Calculate integrals of dark-matter angular clustering and
     magnification over reference n(z)'s and unknowns' z kernels.
+    Reference bins are assumed to be rectangular in z.
+
     Arguments:
     `kernels`: a class that will evaluate dn/dz of all the redshift
-               kernels, such as `Qlna` instance.
-    `z_r`:     z values at the points being used to integrate across
-               each reference redshift bin.  Array has shape (Nr, Nz) 
-               where Nr is number of reference bins and Nz is the 
-               (max) number of z values being evaluated for integration
-               across a bin.
-    `dndz_r`:  Array of shape matching `z_r` whose [ir,iz] element gives
-               the fraction of members of reference bin ir within the 
-               redshift bin centered at `z_r[ir,iz]`.  Should satisfy
-               sum(dndz_r,axis=1) == 1.
-    `b_r`:     Array of shape (Nr) giving reference bias in each bin.
-    `dz_u`:    Redshift increment to use when integrated magnification
-               coefficients over unknowns' kernels.
-    `w_dm`:    Function returning the w_dm quantity as a function of an
+               kernels K(z), having members `nz, zbounds()` and can be called
+               with arguments (k,z) to give dn/dz of kernel k at redshift(s) z.
+               Such as `Qlna` instance.
+    `zr0, dzr, Nzr`:  Center of first reference z bin, width, and number of bins,
+               respectively.
+    `cda, c_over_H`: Functions of z returning the comoving angular diameter to z, and
+               the value c/H(z), in matching units.
+    `wdm`:     Function returning the w_dm quantity as a function of an
                array of values of z.
                w_dm = H / (c Da^2) \int d\theta W(\theta) 
                   \sum_\ell [(2\ell+1)/4\pi] P_\delta((ell+0.5)/Da) P_\ell(\theta)
                where Da = comoving angular diameter distance to z, P_\delta is matter
                power spectrum in 3d, and P_\ell are Legendre polynomials.
-    `cda`:     Function returning comoving angular diameter distance to array of
-               redshift values z in fiducial cosmology.
-    `omega_m_c2`: Value of \omega_m / c^2 in appropriate units.
+    `oversample_r`:  Oversampling factor for integrating over the reference bins.
+    `Omega_m`: total matter density parameter
 
-    Returns: Three arrays each of shape (Nk, Nr) where Nk is number of unknown's kernels
-    and Nr is number of reference bins.
-    `A_mr`     is b_r \int dz K_m(z) n_r(z) w_dm(z)
+    Returns: Three JAX device arrays, each of shape (Nk, Nr), where Nk is number 
+    of unknown's kernels and Nr is number of reference bins.
+    `A_mr`     is \int dz K_k(z) n_r(z) w_dm(z)
     `Mu_mr`    is coefficient for magnification of unknowns by references,
-               3 \omega_m / c^2 ??? \int dz_r n_r(z_r) w_dm(z_r) x 
-                  \int_{z_u>z_r} dz_u K_m(z_u)  cda(z_r) * (cda(z_u)-cda(z_r)) / (1+z_r) / cda(z_u)
-    `Mr_mr`    is coefficient for magnification of references by unknowns.  Swap u,r in integral above.
-    ??? Check units / factors of c in the integration for magnification.'''
+               3 \Omega_m  H0/c \int dz_r n_r(z_r) w_dm(z_r) x (H0/H(z_r)) * (1+z_r)
+                  \int_{z_u>z_r} dz_u K_k(z_u)  cda(z_r) * (1-cda(z_r)) / cda(z_u)
+    `Mr_mr`    is coefficient for magnification of references by unknowns.  Swap u,r in integral above.'''
 
-    # Do 1 reference bin at a time.
-    A = []
-    Mu = []
-    Mr = []
-    for ir in range(len(b_r)):
-        zz = z_r[ir]
-        dndz_u = kernels.kvals(zz)
-        w = w_dm(zz)
-        # Integrate (sum) over z for each kernel m
-        A.append(b_r[ir] * np.einsum('j,mj,j->m',dndz_r[ir],dndz_u,w))
-        
-        # Integrate one magnification term
-        cda_r = cda(zz)
-        zu = np.arange(np.min(zz), z_max, dz_u)  # Build redshifts to integrate over kernels
-        cda_u = cda(zu)
-        dndz_u = kernels.kvals(zu)
-        # Calculate lensing kernel - shape (Nzu, Nzr)
-        lensing = np.max( (1 - cda_r[np.newaxis,:]/cda_u[:,np.newaxis]), 0.)
-        Mu.append( np.einsum('mi,j,ij->m',dndz_u, dndz_r[ir]*w*cda_r/(1+zz), lensing))
+    # Points at which to sample r functions
+    zr = np.linspace( zr0-dzr/2, zr0+(Nzr-0.5)*dzr, Nzr*oversample_r+1)
 
-        # Now for magnification of references
-        zu = np.arange(0, np.max(zz),dz_u)
-        cda_u = cda(zu)
-        dndz_u = kernels.kvals(zu)
-        # Calculate lensing kernel - shape (Nzu, Nzr)
-        lensing = np.max( (1 - cda_u[:,np.newaxis]/cda_r[np.newaxis,:]), 0.)
-        Mr.append( np.einsum('mj,j,i,ij->m',dndz_u, w_dm(zu)*cda_u/(1+zu), dndz_r[ir], lensing))
+    def collapse_r(array, axis=0):
+        '''Take oversampled function of zr and integrate back into Nzr bins'''
+        # Move the zr axis to the front
+        x = np.moveaxis(array,axis,0)
+        # Start with endpoints for trapezoid integration
+        out = 0.5*(x[:-1:oversample_r] + x[oversample_r::oversample_r])
+        # Add in middle points
+        for i in range(1,oversample_r):
+            out += x[i::oversample_r]
+        # Include integration factor which yields unit integral over each r bin.
+        out *= 1. / oversample_r
+        # Move axis back
+        if axis!=0:
+            out = np.moveaxis(out,0,axis)
+        return out
 
-    # Stack up the results into output arrays and add some constants
-    return np.array(A), dz_u*np.array(Mu) * 3 * omega_m_c2, dz_u*np.array(Mr) * 3 * omega_m_c2
+    dzk = 0.005   # dz for integrating over unknowns' kernels
+
+
+    Nk = kernels.nz
+    zbounds = kernels.zbounds()
+
+    # Create empty arrays for results
+    A = np.zeros( (Nk,Nzr), dtype=float)
+    Mu = np.zeros( (Nk,Nzr), dtype=float)
+    Mr = np.zeros( (Nk,Nzr), dtype=float)
+
+    # Calculate needed quantities at reference z's
+    cda_r = cda(zr)
+    H0H_r = c_over_H(zr) / c_over_H(0.)  # H(z) / H0
+    wdm_r = wdm(zr)
+    chi_r = cda(zr)
+
+    # Loop over kernels
+    for k in range(Nk):
+        # First the clustering, evaluated at common set of z's
+        A[k] = collapse_r(wdm_r * kernels(k,zr))
+        # Now the lensing
+        zmin = zbounds[k,0]
+        zmax = zbounds[k,1]
+        n = int(np.floor( (zmax-zmin)/dzk)) + 1  # Number of z intervals to squeeze into kernel
+        zk = np.linspace(zmin,zmax,n+1)
+        dz = zk[1]-zk[0] 
+        kk = kernels(k,zk)  # The kernel values at the endpoint will be zero
+
+        chi_u = cda(zk)
+        # Calculate when the unknowns are the lensing sources
+        # Mean lensing factor over the kernel:
+        lens_u = dz * np.sum(np.maximum(0., 1 - chi_r[:,np.newaxis]/chi_u[np.newaxis,:])*kk, axis=1)
+        Mu[k] = collapse_r( lens_u * wdm_r * chi_r * (1+zr) * H0H_r)
+
+
+        # When the references are the lensing sources:
+        lens_r = np.maximum(0., 1 - chi_u[np.newaxis,:]/chi_r[:,np.newaxis]) # r is 1st index
+        # Integrate over zk
+        mm = dz * np.sum(kk*lens_r * wdm(zk) * chi_u * (1+zk) * (c_over_H(zk)/c_over_H(0.)), axis=1)
+        # Integrate over zr:
+        Mr[k] = collapse_r(mm)
+    
+    Mu *= 3 * Omega_m / c_over_H(0.)
+    Mr *= 3 * Omega_m / c_over_H(0.)
+
+    return jnp.array(A), jnp.array(Mu), jnp.array(Mr)
+
+def prep_cov_w(cov_w):
+    '''Get the inverse square root of w covariance for each u, which is the form
+    we need for logpwz (D_q^-1 * U^T_w in notes).'''
+    
+    # Take eigenvals/vecs for each u
+    s,U = jnp.linalg.eigh(cov_w)
+    # Sw is a "square root" of inverse of cov_w, so cov_w^{-1} = Sw.T @ Sw
+    Sw = jnp.einsum('ur,usr->urs',s**(-0.5), U)  # indexed by (u,r,r') now.
+    return Sw
 
 def logpwz(f_um, b_u, b_r,
            alpha_u0, alpha_r0,
@@ -231,7 +280,7 @@ def logpwz(f_um, b_u, b_r,
     Returns:
     `logp`:       Scalar value of log p(w | f_um, b_u, b_r)
     `logp_df`:    Derivatives of logp w.r.t. components f_um, shape (Nu,Nm)
-    `logp_dbu`:   Derivatives of logp w.r.t. b_u values, shape (Nu).
+    `logp_dbu`:   Derivatives of logp w.r.t. b_u values, shape (Nu).'''
     
     '''Calculate log p(w | f_um, b_u) given fixed values of b_r, marginalizing
     over the nuisance parameters s_uk (systematic for bins of u), alpha_u, and 
@@ -240,11 +289,6 @@ def logpwz(f_um, b_u, b_r,
     '''cov_w is assumed to be diagonal in unknowns' bins u, so indexed by (u,r,r'),
     and symmetric in r/r'.'''
 
-    # The only version of cov_w that we actually need is its inverse square root:
-    # Take eigenvals/vecs for each u
-    s,U = jnp.linalg.eigh(cov_w, hermitian=True)
-    # Sw is a "square root" of inverse of cov_w, so cov_w^{-1} = Sw.T @ Sw, equal D_q^-1 * U^T_w in notes
-    Sw = jnp.einsum('ur,usr->urs',s**(-0.5), U)  # indexed by (u,r,r') now.
     
     # The explicit parameter vector x will be concatenation of f_um and b_u.  We
     # won't actually need that vector
@@ -274,7 +318,7 @@ def logpwz(f_um, b_u, b_r,
     w0 = jnp.einsum('um,urm->ur',f_um, w0_df)  # indexed by [u,r]
 
     # The Delta vector holds the values of sqrt(cov_w)^{-1}*(w - w0)
-    Delta = jnp.einsum('urs,us->ur',Sw,w-w_model_0)  # Indexed by [u,r]
+    Delta = jnp.einsum('urs,us->ur',Sw,w-w0)  # Indexed by [u,r]
 
     # And its derivatives w.r.t. parameters:
     Delta_df = jnp.einsum('urs,usm->urm',Sw,-w0_df)  # Indexed by [u,r,m] where (u,m) index f
@@ -298,17 +342,17 @@ def logpwz(f_um, b_u, b_r,
     # First the s_uk values.  Note duplication (diagonal) of u index in w_ur and s_uk
     B0_df = jnp.einsum('usr,u,mr,kr,uk->uskm',Sw,b_u, A_mr, Sys_kr,sigma_s_uk) # indexed by [u,r,k,m]
     B0 = jnp.einsum('urkm,um->urk',B0_df, f_um) # indexed by [u,r,k]
-    B0_dbu = jnp.einsum('usr,um,mr,kr,uk->usk,',Sw,f_um,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,k]
+    B0_dbu = jnp.einsum('usr,um,mr,kr,uk->usk',Sw,f_um,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,k]
 
     # Next the alpha_u terms
-    B1_df = jnp.einsum('usr,r,mr,u->vsm',Sw,b_r, Mu_mr, sigma_alpha_u) # indexed by [u,r,m]
+    B1_df = jnp.einsum('usr,r,mr,u->usm',Sw,b_r, Mu_mr, sigma_alpha_u) # indexed by [u,r,m]
     B1 = jnp.einsum('urm,um->ur',B1_df, f_um) # indexed by [u,r]
     # B1_dbu = 0.
     
     # And the alpha_r terms
-    B2_df = jnp.einsum('usr,u,mr,r->vsm',Sw,b_u, Mr_mr, sigma_alpha_r) # indexed by [u,r,m]
+    B2_df = jnp.einsum('usr,u,mr,r->usm',Sw,b_u, Mr_mr, sigma_alpha_r) # indexed by [u,r,m]
     B2 = jnp.einsum('urm,um->ur',B2_df, f_um) # indexed by [u,r]
-    B2_dbu = jnp.einsum('usr,mu,mr,r->ur',Sw, f_mu,Mr_mr, sigma_alpha_r) # indexed by [u,r]
+    B2_dbu = jnp.einsum('usr,um,mr,r->ur',Sw, f_um,Mr_mr, sigma_alpha_r) # indexed by [u,r]
 
     # Need to build the matrix t = (I + B^T B)
     # B^T * B will be Nq x Nq
@@ -331,19 +375,19 @@ def logpwz(f_um, b_u, b_r,
     BTB = BTB.at[N1:N2,:N1].set(t2.reshape(N1,Nu).T)  # (B1,B0)
     # (B0,B2)
     t1 = jnp.einsum('urk,ur->ukr',B0,B2).reshape(N1,Nr)
-    t = t.at[:N1,N2].set(t1)
-    t = t.at[N2:,:N1].set(t1.T)  # (B2,B0)
+    BTB = BTB.at[:N1,N2:].set(t1)
+    BTB = BTB.at[N2:,:N1].set(t1.T)  # (B2,B0)
     # (B1,B1) - diagonal
-    t = t.at[N1+iu,N1+iu].add(jnp.einsum('ur,ur->u',B1,B1))
+    BTB = BTB.at[N1+iu,N1+iu].add(jnp.einsum('ur,ur->u',B1,B1))
     # (B1,B2)
     t1 = B1 * B2  # [u,r] * [u,r] -> [u,r]
-    t = t.at[N1:N2,N2:].set(t1)
-    t = t.at[N2:,N1:N2].set(t1.T)  # (B2,B0)
+    BTB = BTB.at[N1:N2,N2:].set(t1)
+    BTB = BTB.at[N2:,N1:N2].set(t1.T)  # (B2,B0)
     # (B2, B2) - diagonal
-    t = t.at[N2+ir,N2+ir].add(jnp.einsum('ur,ur->r',B2,B2))
+    BTB = BTB.at[N2+ir,N2+ir].add(jnp.einsum('ur,ur->r',B2,B2))
     
     # Get the L matrix = Cholesky of t.
-    L = jnp.linalg.cholesky(t)
+    L = jnp.linalg.cholesky(BTB)
     # Actually want inverse of this:
     L = jnp.linalg.inv(L)
 
@@ -387,25 +431,25 @@ def logpwz(f_um, b_u, b_r,
 
     # dbu
     logp_dbu = logp_dbu + jnp.einsum('uk,urk,ur->u',LTLBTD[:N1].reshape(Nu,Nk), B0_dbu, Delta) 
-    logp_dbu = logp_dbu + jnp.einsum('u,ur,ur->u',LTLBTD[N1:N2], B1_dbu, Delta)  
+    # B1_dbu=0, skip it
     logp_dbu = logp_dbu + jnp.einsum('r,ur,ur->u',LTLBTD[N2:], B2_dbu, Delta)
 
     ## Now need B^T_df B + B^T B_df
     # This will need dimensions (q,q,u,m), and we'll split q into its 3 parts.
-    BTB_df = jnp.zeros((Nq,Nq,Nu,Nk), dtype=float)
+    BTB_df = jnp.zeros((Nq,Nq,Nu,Nm), dtype=float)
 
     # (B0,B0)
     t1 = jnp.einsum('urkm,url->uklm',B0_df, B0)  # (uk,ul,um)
     # Add the k/l transpose
     t1 = t1 + jnp.swapaxes(t1,1,2)
-    t2 = np.zeros((Nu,Nk,Nu,Nk,Nu,Nm), dtype=float)
+    t2 = jnp.zeros((Nu,Nk,Nu,Nk,Nu,Nm), dtype=float)
     t2 = t2.at[iu,:,iu,:,iu,:].set(t1).reshape(Nu*Nk,Nu*Nk,Nu,Nm)
     BTB_df.at[:N1,:N1,:,:].set(t2)
 
     # (B0,B1)
     t1 = jnp.einsum('urkm,ur->ukm',B0_df, B1)  # (uk,u,um)
     t1 = t1 + jnp.einsum('urk,urm->ukm',B0,B1_df)
-    t2 = np.zeros((Nu,Nk,Nu,Nu,Nm), dtype=float)
+    t2 = jnp.zeros((Nu,Nk,Nu,Nu,Nm), dtype=float)
     t2 = t2.at[iu,:,iu,iu,:].set(t1).reshape(Nu*Nk,Nu,Nu,Nm)
     BTB_df.at[:N1,N1:N2,:,:].set(t2)
     BTB_df.at[N1:N2,:N1,:,:].set(jnp.swapaxes(t2,0,1))
@@ -413,7 +457,7 @@ def logpwz(f_um, b_u, b_r,
     # (B0,B2)
     t1 = jnp.einsum('urkm,ur->ukrm',B0_df, B2)  # (uk,r,um)
     t1 = t1 + jnp.einsum('urk,urm->ukrm',B0,B2_df)
-    t2 = np.zeros((Nu,Nk,Nr,Nu,Nm), dtype=float)
+    t2 = jnp.zeros((Nu,Nk,Nr,Nu,Nm), dtype=float)
     t2 = t2.at[iu,:,:,iu,:].set(t1).reshape(Nu*Nk,Nr,Nu,Nm)
     BTB_df.at[:N1,N2:,:,:].set(t2)
     BTB_df.at[N2:,:N1,:,:].set(jnp.swapaxes(t2,0,1))
@@ -430,7 +474,7 @@ def logpwz(f_um, b_u, b_r,
 
     # (B2,B2)
     t1 = 2 * jnp.einsum('urm, ur->rum',B2_df, B2) # (r,um) - self-conjugate
-    BTB_df.at[N2+ir,N2+ir,iu,:].set(t1)
+    BTB_df.at[N2+ir,N2+ir,:,:].set(t1)
 
     # Add derivative of logdet of (I+B^TB):
     logp_df = logp_df - 0.5*jnp.einsum('pq,qpum->um',LTL,BTB_df)  # is - sign correct??
@@ -446,22 +490,22 @@ def logpwz(f_um, b_u, b_r,
     t1 = jnp.einsum('urk,url->ukl',B0_dbu, B0)  # (uk,ul,u)
     # Add the k/l transpose
     t1 = t1 + jnp.swapaxes(t1,1,2)
-    t2 = np.zeros((Nu,Nk,Nu,Nk,Nu), dtype=float)
+    t2 = jnp.zeros((Nu,Nk,Nu,Nk,Nu), dtype=float)
     t2 = t2.at[iu,:,iu,:,iu].set(t1).reshape(Nu*Nk,Nu*Nk,Nu)
     BTB_dbu.at[:N1,:N1,:].set(t2)
 
     # (B0,B1)
     t1 = jnp.einsum('urk,ur->uk',B0_dbu, B1)  # (uk,u,u)
     # B1_dbu is zero, can skip.
-    t2 = np.zeros((Nu,Nk,Nu,Nu), dtype=float)
-    t2 = t2.at[iu,:,iu,iu,iu].set(t1).reshape(Nu*Nk,Nu,Nu)
+    t2 = jnp.zeros((Nu,Nk,Nu,Nu), dtype=float)
+    t2 = t2.at[iu,:,iu,iu].set(t1).reshape(Nu*Nk,Nu,Nu)
     BTB_dbu.at[:N1,N1:N2,:].set(t2)
     BTB_dbu.at[N1:N2,:N1,:].set(jnp.swapaxes(t2,0,1))
     
     # (B0,B2)
     t1 = jnp.einsum('urk,ur->ukr',B0_dbu, B2)  # (uk,r,u)
     t1 = t1 + jnp.einsum('urk,ur->ukr',B0,B2_dbu)
-    t2 = np.zeros((Nu,Nk,Nr,Nu), dtype=float)
+    t2 = jnp.zeros((Nu,Nk,Nr,Nu), dtype=float)
     t2 = t2.at[iu,:,:,iu].set(t1).reshape(Nu*Nk,Nr,Nu)
     BTB_dbu.at[:N1,N2:,:].set(t2)
     BTB_dbu.at[N2:,:N1,:].set(jnp.swapaxes(t2,0,1))
@@ -475,7 +519,7 @@ def logpwz(f_um, b_u, b_r,
 
     # (B2,B2)
     t1 = 2 * jnp.einsum('ur, ur->ru',B2_dbu, B2) # (r,u) - self-conjugate
-    BTB_dbu.at[N2+ir,N2+ir,iu].set(t1)
+    BTB_dbu.at[N2+ir,N2+ir,:].set(t1)
 
     # Add derivative of logdet of (I+B^TB):
     logp_dbu = logp_dbu - 0.5*jnp.einsum('pq,qpu->u',LTL,BTB_dbu)  # is - sign correct??
