@@ -241,14 +241,15 @@ def prep_cov_w(cov_w):
     return Sw
 
 def logpwz(f_um, b_u, b_r,
-           alpha_u0, alpha_r0,
-           sigma_s_uk, sigma_alpha_u, sigma_alpha_r,
+           alpha_u0, sigma_alpha_u, 
+           alpha_r_basis, ar0, sigma_ar,
+           Sys_kr, sigma_s_uk, 
            w, Sw,
-           Sys_kr, A_mr, Mu_mr, Mr_mr):
+           A_mr, Mu_mr, Mr_mr):
     '''Calculate the log of the probability of observing wz data, and derivatives.
     The f_mu and b_u values are considered free parameters, and b_r as fixed.
     The values of the sys coefficients s_uk, and the magnification parameters
-    alpha_u and alpha_r, are nuisance parameters with Gaussian priors that will
+    alpha_u and ar (specifying alpha_r), are nuisance parameters with Gaussian priors that will
     be marginalized on the fly within this routine.
 
     The reference bins r can concatenate measurements from different spectroscopic surveys'
@@ -264,17 +265,19 @@ def logpwz(f_um, b_u, b_r,
                   shape (Nu,Nk)
     `b_u`:        Bias values for galaxies in u, shape (Nu)
     `b_r`:        Bias values for reference galaxy subset r, shape (Nr)
-    `sigma_s_uk`: Prior uncertainties on sys-error coefficients s_uk.  The means
-                  of priors are assumed to be zero, shape (Nu,Nk).
     `alpha_u0, sigma_alpha_u`: Mean and sigma of Gaussian priors on magnification
                   coefficients of unknown sources bin u, shape (Nu) each.
-    `alpha_r0, sigma_alpha_r`: Mean and sigma of Gaussian priors on magnification
-                  coefficients of reference objects bin r, shape (Nr) each.
+    `alpha_r_basis`:  Matrix of shape (Nr, Nar) defining basis functions over zr
+                  for alpha_r, such that alpha_r = alpha_r_basis @ (ar0 + ar).
+    `ar0, sigma_ar`:  Means and std dev's of Gaussian priors on the basis coefficients
+                  of the alpha_r values.
+    `Sys_kr`:     Value of Sys function k at redshift of bin r, shape (Nk,Nr).
+    `sigma_s_uk`: Prior uncertainties on sys-error coefficients s_uk.  The means
+                  of priors are assumed to be zero, shape (Nu,Nk).
     `w`:          Array of cross-correlations between unknown and reference bins,
                   shape (Nu,Nr).
     `Sw`:         "Square root" of the covariance matrix for w, produced in
                   routine above, shape (Nu, Nr, Nr).
-    `Sys_kr`:     Value of Sys function k at redshift of bin r, shape (Nk,Nr).
     `A_mr, Mu_mr, Mr_mr`: Theory matrices integrating over DM clustering for the
                   clustering and magnification terms of model for w, as calculated
                   in routines above.  Each has shape (Nm, Nr)
@@ -298,7 +301,7 @@ def logpwz(f_um, b_u, b_r,
     Nr = b_r.shape[0]
     Nk = Sys_kr.shape[0]
     Nw = Nu*Nr
-
+    Nar = alpha_r_basis.shape[1]  # Number of controlling params for alpha_r
 
     # We'll want derivs w.r.t. non-marginalized parameters f_um and b_u (could do b_r later),
     # so I will construct in two parts: first, _df is with respect to
@@ -309,11 +312,11 @@ def logpwz(f_um, b_u, b_r,
     # w0_df is its derivs w.r.t. f_um:
     w0_df = jnp.einsum('u,r,mr->urm',b_u,  b_r,A_mr) + \
             jnp.einsum('u, r, mr->urm', alpha_u0, b_r, Mu_mr) + \
-            jnp.einsum('u, r, mr->urm', b_u, alpha_r0, Mr_mr)    # indexed by [u,r,m]
+            jnp.einsum('u, ra, a, mr->urm', b_u, alpha_r_basis, ar0, Mr_mr)    # indexed by [u,r,m]
 
     # Derivs w.r.t. b_u
     w0_dbu = jnp.einsum('um,r,mr->ur', f_um,  b_r, A_mr) + \
-             jnp.einsum('um, r, mr->ur', f_um, alpha_r0, Mr_mr)  # indexed by [u,r]
+             jnp.einsum('um, ra, a, mr->ur', f_um, alpha_r_basis, ar0, Mr_mr)  # indexed by [u,r]
 
     # Value:
     w0 = jnp.einsum('um,urm->ur',f_um, w0_df)  # indexed by [u,r]
@@ -330,11 +333,11 @@ def logpwz(f_um, b_u, b_r,
     # The implicit (marginalized) parameters will concatenate:
     # * q0 = s_uk (Nu * Nk entries, ???subdivide r by reference set R???)
     # * q1 = alpha_u (Nu entries)
-    # * q2 = alpha_r (Nr entries,  ???subdivide r by reference set R???)
+    # * q2 = ar (Nar entries, determining alpha_r)
     #
     N1 = Nu*Nk   # Index of the first element of q1
     N2 = N1 + Nu # Index of first element of q2
-    Nq = N2 + Nr # Total size of marginalization
+    Nq = N2 + Nar # Total size of marginalization
     
     # We will construct the combination B = Sw * w_q * D_q
     # I will keep these components of q in distinct arrays because they are
@@ -353,9 +356,9 @@ def logpwz(f_um, b_u, b_r,
     # B1_dbu = 0.
     
     # And the alpha_r terms
-    B2_df = jnp.einsum('usr,u,mr,r->usm',Sw,b_u, Mr_mr, sigma_alpha_r) # indexed by [u,r,m]
-    B2 = jnp.einsum('urm,um->ur',B2_df, f_um) # indexed by [u,r]
-    B2_dbu = jnp.einsum('usr,um,mr,r->us',Sw, f_um,Mr_mr, sigma_alpha_r) # indexed by [u,r]
+    B2_df = jnp.einsum('usr,u,mr,ra, a->usam',Sw,b_u, Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,m]
+    B2 = jnp.einsum('uram,um->ura',B2_df, f_um) # indexed by [u,r,a]
+    B2_dbu = jnp.einsum('usr,um,mr,ra,a->usa',Sw, f_um,Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a]
 
     ### WORKS print('B2:',B2[1,6], B2_dbu[1,6],'->',B2[1,6]+0.1*B2_dbu[1,6]) ###
 
@@ -366,7 +369,7 @@ def logpwz(f_um, b_u, b_r,
     
     IBTB = jnp.eye(Nq)
     iu = jnp.arange(Nu)
-    ir = jnp.arange(Nr)
+    iar = jnp.arange(Nar)
     # Start with (B0,B0) section
     t1 = jnp.einsum('urk,url->ukl',B0,B0)
     t2 = jnp.zeros( (Nu,Nk,Nu,Nk), dtype=float)
@@ -379,17 +382,17 @@ def logpwz(f_um, b_u, b_r,
     IBTB = IBTB.at[:N1,N1:N2].set(t2.reshape(N1,Nu))
     IBTB = IBTB.at[N1:N2,:N1].set(t2.reshape(N1,Nu).T)  # (B1,B0)
     # (B0,B2)
-    t1 = jnp.einsum('urk,ur->ukr',B0,B2).reshape(N1,Nr)
+    t1 = jnp.einsum('urk,ura->uka',B0,B2).reshape(N1,Nar)
     IBTB = IBTB.at[:N1,N2:].set(t1)
     IBTB = IBTB.at[N2:,:N1].set(t1.T)  # (B2,B0)
     # (B1,B1) - diagonal
     IBTB = IBTB.at[N1+iu,N1+iu].add(jnp.einsum('ur,ur->u',B1,B1))
     # (B1,B2)
-    t1 = B1 * B2  # [u,r] * [u,r] -> [u,r]
+    t1 = jnp.einsum('ur,ura->ua',B1,B2)
     IBTB = IBTB.at[N1:N2,N2:].set(t1)
     IBTB = IBTB.at[N2:,N1:N2].set(t1.T)  # (B2,B0)
     # (B2, B2) - diagonal
-    IBTB = IBTB.at[N2+ir,N2+ir].add(jnp.einsum('ur,ur->r',B2,B2))
+    IBTB = IBTB.at[N2:,N2:].add(jnp.einsum('ura,urb->ab',B2,B2))
     
     # Get the L matrix = Cholesky of t.
     L = jnp.linalg.cholesky(IBTB)
@@ -403,7 +406,7 @@ def logpwz(f_um, b_u, b_r,
     # Calculate the vector L*B^T*D in three parts
     LBTD = jnp.einsum('quk,urk,ur->q',L[:,:N1].reshape(Nq,Nu,Nk), B0, Delta)
     LBTD = LBTD + jnp.einsum('qu,ur,ur->q',L[:,N1:N2], B1, Delta)
-    LBTD = LBTD + jnp.einsum('qr,ur,ur->q',L[:,N2:], B2, Delta)
+    LBTD = LBTD + jnp.einsum('qa,ura,ur->q',L[:,N2:], B2, Delta)
                          
     logp = -0.5*(logdet + jnp.sum(Delta*Delta) - jnp.sum(LBTD*LBTD))
 
@@ -421,23 +424,23 @@ def logpwz(f_um, b_u, b_r,
     # df first, doing 3 parts of B
     logp_df = logp_df + jnp.einsum('uk,urk,urm->um',LTLBTD[:N1].reshape(Nu,Nk), B0, Delta_df) 
     logp_df = logp_df + jnp.einsum('u,ur,urm->um',LTLBTD[N1:N2], B1, Delta_df)  
-    logp_df = logp_df + jnp.einsum('r,ur,urm->um',LTLBTD[N2:], B2, Delta_df)
+    logp_df = logp_df + jnp.einsum('a,ura,urm->um',LTLBTD[N2:], B2, Delta_df)
 
     # dbu
     logp_dbu = logp_dbu + jnp.einsum('uk,urk,ur->u',LTLBTD[:N1].reshape(Nu,Nk), B0, Delta_dbu) 
     logp_dbu = logp_dbu + jnp.einsum('u,ur,ur->u',LTLBTD[N1:N2], B1, Delta_dbu)  
-    logp_dbu = logp_dbu + jnp.einsum('r,ur,ur->u',LTLBTD[N2:], B2, Delta_dbu)
+    logp_dbu = logp_dbu + jnp.einsum('a,ura,ur->u',LTLBTD[N2:], B2, Delta_dbu)
 
     # Then B^T_df * Delta which will be indexed by (q,x), dotted into LTLBTD
     # df first, doing 3 parts of B
     logp_df = logp_df + jnp.einsum('uk,urkm,ur->um',LTLBTD[:N1].reshape(Nu,Nk), B0_df, Delta) 
     logp_df = logp_df + jnp.einsum('u,urm,ur->um',LTLBTD[N1:N2], B1_df, Delta)  
-    logp_df = logp_df + jnp.einsum('r,urm,ur->um',LTLBTD[N2:], B2_df, Delta)
+    logp_df = logp_df + jnp.einsum('a,uram,ur->um',LTLBTD[N2:], B2_df, Delta)
 
     # dbu
     logp_dbu = logp_dbu + jnp.einsum('uk,urk,ur->u',LTLBTD[:N1].reshape(Nu,Nk), B0_dbu, Delta) 
     # B1_dbu=0, skip it
-    logp_dbu = logp_dbu + jnp.einsum('r,ur,ur->u',LTLBTD[N2:], B2_dbu, Delta)
+    logp_dbu = logp_dbu + jnp.einsum('a,ura,ur->u',LTLBTD[N2:], B2_dbu, Delta)
 
     ## Now need B^T_df B + B^T B_df
     # This will need dimensions (q,q,u,m), and we'll split q into its 3 parts.
@@ -460,10 +463,10 @@ def logpwz(f_um, b_u, b_r,
     BTB_df = BTB_df.at[N1:N2,:N1,:,:].set(jnp.swapaxes(t2,0,1))
     
     # (B0,B2)
-    t1 = jnp.einsum('urkm,ur->ukrm',B0_df, B2)  # (uk,r,um)
-    t1 = t1 + jnp.einsum('urk,urm->ukrm',B0,B2_df)
-    t2 = jnp.zeros((Nu,Nk,Nr,Nu,Nm), dtype=float)
-    t2 = t2.at[iu,:,:,iu,:].set(t1).reshape(Nu*Nk,Nr,Nu,Nm)
+    t1 = jnp.einsum('urkm,ura->ukam',B0_df, B2)  # (uk,a,um)
+    t1 = t1 + jnp.einsum('urk,uram->ukam',B0,B2_df)
+    t2 = jnp.zeros((Nu,Nk,Nar,Nu,Nm), dtype=float)
+    t2 = t2.at[iu,:,:,iu,:].set(t1).reshape(Nu*Nk,Nar,Nu,Nm)
     BTB_df = BTB_df.at[:N1,N2:,:,:].set(t2)
     BTB_df = BTB_df.at[N2:,:N1,:,:].set(jnp.swapaxes(t2,0,1))
     
@@ -472,14 +475,15 @@ def logpwz(f_um, b_u, b_r,
     BTB_df = BTB_df.at[N1+iu,N1+iu,iu,:].set(t1)
 
     # (B1,B2)
-    t1 = jnp.einsum('urm, ur->urm',B1_df, B2) # (u,r,um)
-    t1 = t1 + jnp.einsum('ur, urm->urm',B1, B2_df) # (u,r,um)
+    t1 = jnp.einsum('urm, ura->uam',B1_df, B2) # (u,a,um)
+    t1 = t1 + jnp.einsum('ur, uram->uam',B1, B2_df) # (u,a,um)
     BTB_df = BTB_df.at[N1+iu,N2:,iu,:].set(t1)
     BTB_df = BTB_df.at[N2:,N1+iu,iu,:].set(jnp.swapaxes(t1,0,1))
 
     # (B2,B2)
-    t1 = 2 * jnp.einsum('urm, ur->rum',B2_df, B2) # (r,um) - self-conjugate
-    BTB_df = BTB_df.at[N2+ir,N2+ir,:,:].set(t1)
+    t1 = jnp.einsum('uram, urb->abum',B2_df, B2) # (a,b,um)
+    t1 = t1 + np.swapaxes(t1,0,1)
+    BTB_df = BTB_df.at[N2:,N2:,:,:].set(t1)
 
     # Add derivative of logdet of (I+B^TB):
     logp_df = logp_df - 0.5*jnp.einsum('pq,qpum->um',LTL,BTB_df) 
@@ -508,24 +512,25 @@ def logpwz(f_um, b_u, b_r,
     BTB_dbu = BTB_dbu.at[N1:N2,:N1,:].set(jnp.swapaxes(t2,0,1))
     
     # (B0,B2)
-    t1 = jnp.einsum('urk,ur->ukr',B0_dbu, B2)  # (uk,r,u)
-    t1 = t1 + jnp.einsum('urk,ur->ukr',B0,B2_dbu)
-    t2 = jnp.zeros((Nu,Nk,Nr,Nu), dtype=float)
-    t2 = t2.at[iu,:,:,iu].set(t1).reshape(Nu*Nk,Nr,Nu)
+    t1 = jnp.einsum('urk,ura->uka',B0_dbu, B2)  # (uk,a,u)
+    t1 = t1 + jnp.einsum('urk,ura->uka',B0,B2_dbu)
+    t2 = jnp.zeros((Nu,Nk,Nar,Nu), dtype=float)
+    t2 = t2.at[iu,:,:,iu].set(t1).reshape(Nu*Nk,Nar,Nu)
     BTB_dbu = BTB_dbu.at[:N1,N2:,:].set(t2)
     BTB_dbu = BTB_dbu.at[N2:,:N1,:].set(jnp.swapaxes(t2,0,1))
     
     # (B1,B1) - zero derivs w.r.t. b_u
 
     # (B1,B2)
-    t1 = jnp.einsum('ur, ur->ur',B1, B2_dbu) # (u,r,u)
+    t1 = jnp.einsum('ur, ura->ua',B1, B2_dbu) # (u,a,u)
     BTB_dbu = BTB_dbu.at[N1+iu,N2:,iu].set(t1)
     BTB_dbu = BTB_dbu.at[N2:,N1+iu,iu].set(jnp.swapaxes(t1,0,1))
 
     # (B2,B2)
     
-    t1 = 2 * jnp.einsum('ur, ur->ru',B2_dbu, B2) # (r,u) - self-conjugate
-    BTB_dbu = BTB_dbu.at[N2+ir,N2+ir,:].set(t1)
+    t1 = jnp.einsum('ura, urb->abu',B2_dbu, B2) # (a,b,u)
+    t1 = t1 + jnp.swapaxes(t1,0,1)  # Add transpose
+    BTB_dbu = BTB_dbu.at[N2:,N2:,:].set(t1)
 
     # Add derivative of logdet of (I+B^TB):
     logp_dbu = logp_dbu - 0.5*jnp.einsum('pq,qpu->u',LTL,BTB_dbu)  
