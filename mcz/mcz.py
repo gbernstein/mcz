@@ -306,12 +306,12 @@ def logpwz(f_um, b_u, b_r,
 
     # w0 is the model for w evaluated at the mean values of the marginalized parameters q
     # w0_df is its derivs w.r.t. f_um:
-    w0_df = jnp.einsum('u,mr->urm',b_u, A_mr) + \
+    w0_df = jnp.einsum('u,r,mr->urm',b_u,  b_r,A_mr) + \
             jnp.einsum('u, r, mr->urm', alpha_u0, b_r, Mu_mr) + \
             jnp.einsum('u, r, mr->urm', b_u, alpha_r0, Mr_mr)    # indexed by [u,r,m]
 
     # Derivs w.r.t. b_u
-    w0_dbu = jnp.einsum('um,mr->ur', f_um, A_mr) + \
+    w0_dbu = jnp.einsum('um,r,mr->ur', f_um,  b_r, A_mr) + \
              jnp.einsum('um, r, mr->ur', f_um, alpha_r0, Mr_mr)  # indexed by [u,r]
 
     # Value:
@@ -340,9 +340,11 @@ def logpwz(f_um, b_u, b_r,
     # diagonal on different combinations of indices
     # 
     # First the s_uk values.  Note duplication (diagonal) of u index in w_ur and s_uk
-    B0_df = jnp.einsum('usr,u,mr,kr,uk->uskm',Sw,b_u, A_mr, Sys_kr,sigma_s_uk) # indexed by [u,r,k,m]
+    B0_df = jnp.einsum('usr,u,r,mr,kr,uk->uskm',Sw,b_u, b_r, A_mr, Sys_kr,sigma_s_uk) # indexed by [u,r,k,m]
     B0 = jnp.einsum('urkm,um->urk',B0_df, f_um) # indexed by [u,r,k]
-    B0_dbu = jnp.einsum('usr,um,mr,kr,uk->usk',Sw,f_um,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,k]
+    B0_dbu = jnp.einsum('usr,um,r,mr,kr,uk->usk',Sw,f_um, b_r,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,k]
+
+    ### WORKS print('B0:',B0[1,6,1], B0_dbu[1,6,1]) ###
 
     # Next the alpha_u terms
     B1_df = jnp.einsum('usr,r,mr,u->usm',Sw,b_r, Mu_mr, sigma_alpha_u) # indexed by [u,r,m]
@@ -352,55 +354,57 @@ def logpwz(f_um, b_u, b_r,
     # And the alpha_r terms
     B2_df = jnp.einsum('usr,u,mr,r->usm',Sw,b_u, Mr_mr, sigma_alpha_r) # indexed by [u,r,m]
     B2 = jnp.einsum('urm,um->ur',B2_df, f_um) # indexed by [u,r]
-    B2_dbu = jnp.einsum('usr,um,mr,r->ur',Sw, f_um,Mr_mr, sigma_alpha_r) # indexed by [u,r]
+    B2_dbu = jnp.einsum('usr,um,mr,r->us',Sw, f_um,Mr_mr, sigma_alpha_r) # indexed by [u,r]
 
-    # Need to build the matrix t = (I + B^T B)
+    ### WORKS print('B2:',B2[1,6], B2_dbu[1,6],'->',B2[1,6]+0.1*B2_dbu[1,6]) ###
+
+    # Need to build the matrix IBTB = (I + B^T B)
     # B^T * B will be Nq x Nq
     # Will be block diagonal on u except for the rows/cols for alpha_r, with a given alpha_r coupled to ur for all u.
     # So there is probably a faster way to do this inversion, but I'm just going to use dense-matrix routines.
     
-    BTB = jnp.eye(Nq)
+    IBTB = jnp.eye(Nq)
     iu = jnp.arange(Nu)
     ir = jnp.arange(Nr)
     # Start with (B0,B0) section
     t1 = jnp.einsum('urk,url->ukl',B0,B0)
     t2 = jnp.zeros( (Nu,Nk,Nu,Nk), dtype=float)
     t2 = t2.at[iu,:,iu,:].set(t1)
-    BTB = BTB.at[:N1,:N1].add(t2.reshape(N1,N1))
+    IBTB = IBTB.at[:N1,:N1].add(t2.reshape(N1,N1))
     # (B0,B1)
     t1 = jnp.einsum('urk,ur->uk',B0,B1)
     t2 = jnp.zeros( (Nu,Nk,Nu), dtype=float)
     t2 = t2.at[iu,:,iu].set(t1)
-    BTB = BTB.at[:N1,N1:N2].set(t2.reshape(N1,Nu))
-    BTB = BTB.at[N1:N2,:N1].set(t2.reshape(N1,Nu).T)  # (B1,B0)
+    IBTB = IBTB.at[:N1,N1:N2].set(t2.reshape(N1,Nu))
+    IBTB = IBTB.at[N1:N2,:N1].set(t2.reshape(N1,Nu).T)  # (B1,B0)
     # (B0,B2)
     t1 = jnp.einsum('urk,ur->ukr',B0,B2).reshape(N1,Nr)
-    BTB = BTB.at[:N1,N2:].set(t1)
-    BTB = BTB.at[N2:,:N1].set(t1.T)  # (B2,B0)
+    IBTB = IBTB.at[:N1,N2:].set(t1)
+    IBTB = IBTB.at[N2:,:N1].set(t1.T)  # (B2,B0)
     # (B1,B1) - diagonal
-    BTB = BTB.at[N1+iu,N1+iu].add(jnp.einsum('ur,ur->u',B1,B1))
+    IBTB = IBTB.at[N1+iu,N1+iu].add(jnp.einsum('ur,ur->u',B1,B1))
     # (B1,B2)
     t1 = B1 * B2  # [u,r] * [u,r] -> [u,r]
-    BTB = BTB.at[N1:N2,N2:].set(t1)
-    BTB = BTB.at[N2:,N1:N2].set(t1.T)  # (B2,B0)
+    IBTB = IBTB.at[N1:N2,N2:].set(t1)
+    IBTB = IBTB.at[N2:,N1:N2].set(t1.T)  # (B2,B0)
     # (B2, B2) - diagonal
-    BTB = BTB.at[N2+ir,N2+ir].add(jnp.einsum('ur,ur->r',B2,B2))
+    IBTB = IBTB.at[N2+ir,N2+ir].add(jnp.einsum('ur,ur->r',B2,B2))
     
     # Get the L matrix = Cholesky of t.
-    L = jnp.linalg.cholesky(BTB)
+    L = jnp.linalg.cholesky(IBTB)
+
+    # Determinant of IBTB easy from the triangular form:
+    logdet = jnp.sum(jnp.log(jnp.diag(L)**2))
+
     # Actually want inverse of this:
     L = jnp.linalg.inv(L)
-
-    # Determinant is easy from the triangular form:
-    logdet = jnp.sum(jnp.log(jnp.diag(L)))
 
     # Calculate the vector L*B^T*D in three parts
     LBTD = jnp.einsum('quk,urk,ur->q',L[:,:N1].reshape(Nq,Nu,Nk), B0, Delta)
     LBTD = LBTD + jnp.einsum('qu,ur,ur->q',L[:,N1:N2], B1, Delta)
     LBTD = LBTD + jnp.einsum('qr,ur,ur->q',L[:,N2:], B2, Delta)
                          
-    logp = logdet + jnp.sum(Delta*Delta) + jnp.sum(LBTD*LBTD)
-
+    logp = -0.5*(logdet + jnp.sum(Delta*Delta) - jnp.sum(LBTD*LBTD))
 
     ########## Derivs w.r.t. f_um ###########
     # Needed for all derivs:
@@ -444,42 +448,42 @@ def logpwz(f_um, b_u, b_r,
     t1 = t1 + jnp.swapaxes(t1,1,2)
     t2 = jnp.zeros((Nu,Nk,Nu,Nk,Nu,Nm), dtype=float)
     t2 = t2.at[iu,:,iu,:,iu,:].set(t1).reshape(Nu*Nk,Nu*Nk,Nu,Nm)
-    BTB_df.at[:N1,:N1,:,:].set(t2)
+    BTB_df = BTB_df.at[:N1,:N1,:,:].set(t2)
 
     # (B0,B1)
     t1 = jnp.einsum('urkm,ur->ukm',B0_df, B1)  # (uk,u,um)
     t1 = t1 + jnp.einsum('urk,urm->ukm',B0,B1_df)
     t2 = jnp.zeros((Nu,Nk,Nu,Nu,Nm), dtype=float)
     t2 = t2.at[iu,:,iu,iu,:].set(t1).reshape(Nu*Nk,Nu,Nu,Nm)
-    BTB_df.at[:N1,N1:N2,:,:].set(t2)
-    BTB_df.at[N1:N2,:N1,:,:].set(jnp.swapaxes(t2,0,1))
+    BTB_df = BTB_df.at[:N1,N1:N2,:,:].set(t2)
+    BTB_df = BTB_df.at[N1:N2,:N1,:,:].set(jnp.swapaxes(t2,0,1))
     
     # (B0,B2)
     t1 = jnp.einsum('urkm,ur->ukrm',B0_df, B2)  # (uk,r,um)
     t1 = t1 + jnp.einsum('urk,urm->ukrm',B0,B2_df)
     t2 = jnp.zeros((Nu,Nk,Nr,Nu,Nm), dtype=float)
     t2 = t2.at[iu,:,:,iu,:].set(t1).reshape(Nu*Nk,Nr,Nu,Nm)
-    BTB_df.at[:N1,N2:,:,:].set(t2)
-    BTB_df.at[N2:,:N1,:,:].set(jnp.swapaxes(t2,0,1))
+    BTB_df = BTB_df.at[:N1,N2:,:,:].set(t2)
+    BTB_df = BTB_df.at[N2:,:N1,:,:].set(jnp.swapaxes(t2,0,1))
     
     # (B1,B1)
     t1 = 2 * jnp.einsum('urm,ur->um',B1_df, B1)  # (u,u,um) - self-conjugate
-    BTB_df.at[N1+iu,N1+iu,iu,:].set(t1)
+    BTB_df = BTB_df.at[N1+iu,N1+iu,iu,:].set(t1)
 
     # (B1,B2)
     t1 = jnp.einsum('urm, ur->urm',B1_df, B2) # (u,r,um)
     t1 = t1 + jnp.einsum('ur, urm->urm',B1, B2_df) # (u,r,um)
-    BTB_df.at[N1+iu,N2:,iu,:].set(t1)
-    BTB_df.at[N2:,N1+iu,iu,:].set(jnp.swapaxes(t1,0,1))
+    BTB_df = BTB_df.at[N1+iu,N2:,iu,:].set(t1)
+    BTB_df = BTB_df.at[N2:,N1+iu,iu,:].set(jnp.swapaxes(t1,0,1))
 
     # (B2,B2)
     t1 = 2 * jnp.einsum('urm, ur->rum',B2_df, B2) # (r,um) - self-conjugate
-    BTB_df.at[N2+ir,N2+ir,:,:].set(t1)
+    BTB_df = BTB_df.at[N2+ir,N2+ir,:,:].set(t1)
 
     # Add derivative of logdet of (I+B^TB):
-    logp_df = logp_df - 0.5*jnp.einsum('pq,qpum->um',LTL,BTB_df)  # is - sign correct??
+    logp_df = logp_df - 0.5*jnp.einsum('pq,qpum->um',LTL,BTB_df) 
     # And the last term of derivative:
-    logp_df = logp_df - jnp.einsum('p,pqum,q->um',LTLBTD, BTB_df, LTLBTD)
+    logp_df = logp_df - 0.5*jnp.einsum('p,pqum,q->um',LTLBTD, BTB_df, LTLBTD)
 
     ### Do the dbu derivs
     ## Now need B^T_df B + B^T B_df
@@ -492,39 +496,52 @@ def logpwz(f_um, b_u, b_r,
     t1 = t1 + jnp.swapaxes(t1,1,2)
     t2 = jnp.zeros((Nu,Nk,Nu,Nk,Nu), dtype=float)
     t2 = t2.at[iu,:,iu,:,iu].set(t1).reshape(Nu*Nk,Nu*Nk,Nu)
-    BTB_dbu.at[:N1,:N1,:].set(t2)
+    BTB_dbu = BTB_dbu.at[:N1,:N1,:].set(t2)
 
     # (B0,B1)
     t1 = jnp.einsum('urk,ur->uk',B0_dbu, B1)  # (uk,u,u)
     # B1_dbu is zero, can skip.
     t2 = jnp.zeros((Nu,Nk,Nu,Nu), dtype=float)
     t2 = t2.at[iu,:,iu,iu].set(t1).reshape(Nu*Nk,Nu,Nu)
-    BTB_dbu.at[:N1,N1:N2,:].set(t2)
-    BTB_dbu.at[N1:N2,:N1,:].set(jnp.swapaxes(t2,0,1))
+    BTB_dbu = BTB_dbu.at[:N1,N1:N2,:].set(t2)
+    BTB_dbu = BTB_dbu.at[N1:N2,:N1,:].set(jnp.swapaxes(t2,0,1))
     
     # (B0,B2)
     t1 = jnp.einsum('urk,ur->ukr',B0_dbu, B2)  # (uk,r,u)
     t1 = t1 + jnp.einsum('urk,ur->ukr',B0,B2_dbu)
     t2 = jnp.zeros((Nu,Nk,Nr,Nu), dtype=float)
     t2 = t2.at[iu,:,:,iu].set(t1).reshape(Nu*Nk,Nr,Nu)
-    BTB_dbu.at[:N1,N2:,:].set(t2)
-    BTB_dbu.at[N2:,:N1,:].set(jnp.swapaxes(t2,0,1))
+    BTB_dbu = BTB_dbu.at[:N1,N2:,:].set(t2)
+    BTB_dbu = BTB_dbu.at[N2:,:N1,:].set(jnp.swapaxes(t2,0,1))
     
     # (B1,B1) - zero derivs w.r.t. b_u
 
     # (B1,B2)
     t1 = jnp.einsum('ur, ur->ur',B1, B2_dbu) # (u,r,u)
-    BTB_dbu.at[N1+iu,N2:,iu].set(t1)
-    BTB_dbu.at[N2:,N1+iu,iu].set(jnp.swapaxes(t1,0,1))
+    BTB_dbu = BTB_dbu.at[N1+iu,N2:,iu].set(t1)
+    BTB_dbu = BTB_dbu.at[N2:,N1+iu,iu].set(jnp.swapaxes(t1,0,1))
 
     # (B2,B2)
+    
     t1 = 2 * jnp.einsum('ur, ur->ru',B2_dbu, B2) # (r,u) - self-conjugate
-    BTB_dbu.at[N2+ir,N2+ir,:].set(t1)
+    BTB_dbu = BTB_dbu.at[N2+ir,N2+ir,:].set(t1)
 
     # Add derivative of logdet of (I+B^TB):
-    logp_dbu = logp_dbu - 0.5*jnp.einsum('pq,qpu->u',LTL,BTB_dbu)  # is - sign correct??
+    logp_dbu = logp_dbu - 0.5*jnp.einsum('pq,qpu->u',LTL,BTB_dbu)  
+
+    ### BTB derivs work
+    ### ii = N2+6 
+    ### WORKS! print(BTB[ii,ii],BTB_dbu[ii,ii,1],BTB[ii,ii]+0.1*BTB_dbu[ii,ii,1]) ###
+    ### ii = Nk + 2 
+    ### jj = N2+6 
+    ### print(BTB[ii,jj],BTB_dbu[ii,jj,1],BTB[ii,jj]+0.1*BTB_dbu[ii,jj,1]) ###
+    
+    ### WORKS! print(-0.5*logdet, -0.5*jnp.einsum('pq,qpu->u',LTL,BTB_dbu)[1],-0.5*(logdet+0.1*jnp.einsum('pq,qpu->u',LTL,BTB_dbu)[1])) #### debug
+    ### WORKS! print(jnp.sum(Delta*Delta), 2*jnp.einsum('ur,ur->u',Delta_dbu, Delta)) #### debug
+    
+    
     # And the last term of derivative:
-    logp_dbu = logp_dbu - jnp.einsum('p,pqu,q->u',LTLBTD, BTB_dbu, LTLBTD)
+    logp_dbu = logp_dbu - 0.5*jnp.einsum('p,pqu,q->u',LTLBTD, BTB_dbu, LTLBTD)
 
     
     return logp, logp_df, logp_dbu
