@@ -105,7 +105,8 @@ def logpspec(psz, psB, cs, a, Delta_s):
 def sys_basis(zr0, dzr, Nr,
               Nk):
     '''Create a matrix of shape (Nk, Nr) giving the value of the Sys(z_r) basis functions
-    at each reference redshift r.
+    at each reference redshift r.  Note that the coefficients at k=0 are actually
+    coming from the degree=1 Legendre polynomial, i.e. the constant is skipped.
     Arguments:
     `zr0, dzr`:  Central redshift of first reference bin and increment between them
     `Nr`:        Number of reference bins
@@ -122,8 +123,8 @@ def sys_basis(zr0, dzr, Nr,
     # Scaling coefficient for Legendre polynomials:
     ak = np.sqrt(2*np.arange(Nk)+1) / 0.85
 
-    # Build coeffs from Legendre
-    out = np.array( [ak[k] * eval_legendre(k, u) for k in range(Nk)] )
+    # Build coeffs from Legendre - skip the constant
+    out = np.array( [ak[k] * eval_legendre(k+1, u) for k in range(Nk)] )
 
     return jnp.array(out)
 
