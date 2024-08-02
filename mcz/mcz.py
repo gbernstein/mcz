@@ -5,6 +5,58 @@ import jax.numpy as jnp
 from scipy.interpolate import CubicSpline
 from scipy.special import eval_legendre
 
+##################################################################
+### Redshift distribution kernels
+##################################################################
+
+class Rz:
+    def __init__(self, dz, nz):
+        '''Class representing rectangular n(z) kernels (bins) in z.
+        The n(z) will return 0 if evaluated at lower bound, 1/dz at the upper
+        bound, so be careful about integrations.
+        Arguments:
+        `dz`: the step between bin edges (starting at zero)
+        `nz`: the number of kernels.'''
+        self.dz = dz
+        self.nz = nz
+
+    def __call__(self,k,z):
+        '''Evaluate dn/dz for the kernel with index k at an array of
+        z values.'''
+        # Doing duplicative calculations to make this compatible
+        # with JAX arithmetic.
+        inbin = jnp.logical_and( z>k*self.dz, z<=(k+1)*self.dz)
+        return jnp.where(inbin, 1/self.dz, 0.)
+        
+    def zbounds(self):
+        '''Return lower, upper bounds in z of all the bins in (nz,2) array'''
+        zmin = np.arange(self.nz)*self.dz
+        zmax = zmin + self.dz
+        return np.stack( (zmin, zmax), axis=1)
+
+class Tz:
+    def __init__(self, dz, nz):
+        '''Class representing triangular n(z) kernels (bins) in z.
+        First kernel is centered at dz so it's linear at z=0.
+        Arguments:
+        `dz`: the step between bins (starting at zero)
+        `nz`: the number of kernels.'''
+        self.dz = dz
+        self.nz = nz
+
+    def __call__(self,k,z):
+        '''Evaluate dn/dz for the kernel with index k at an array of
+        z values.'''
+        # Doing duplicative calculations to make this compatible
+        # with JAX arithmetic.
+        return jnp.maximum(0., 1 - np.abs(z/self.dz - k - 1)) / self.dz
+        
+    def zbounds(self):
+        '''Return lower, upper bounds in z of all the bins in (nz,2) array'''
+        zmin = np.arange(self.nz)*self.dz
+        zmax = zmin + 2*self.dz
+        return np.stack( (zmin, zmax), axis=1)
+    
 class Qlna:
     def __init__(self, dlna, nz):
         '''Class representing a series of kernels K_i for dn/dz that
@@ -76,6 +128,10 @@ class Qlna:
         out = jnp.moveaxis(out, -1, zaxis)
         return out
     
+##################################################################
+### Probabilities for deep, spec counts
+##################################################################
+
 def logpdeep(M_c, a, Delta_d, A_d):
     '''Return the log-likelihood of the deep counts M_c per cell'''
     nc = jnp.einsum('zcB,z->c',a,(1+Delta_d))
@@ -240,10 +296,10 @@ def prep_cov_w(cov_w):
     Sw = jnp.einsum('ur,usr->urs',s**(-0.5), U)  # indexed by (u,r,r') now.
     return Sw
 
-def w_model(f_um, b_u, b_r, 
-            alpha_u,  ar, s_uk, 
+def w_model(f_um, b_u,  
+            s_uk, alpha_u,  ar, b_r,
             alpha_r_basis, Sys_kr,
-            A_mr, Mu_mr, Mr_mr):
+            A_mr, Mu_mr, Mr_mr, **kwargs):
     '''Calculate model values for w_ur.
     `f_um`:       Fraction of galaxies from unknown set u that lie in redshift kernel k,
                   shape (Nu,Nk)
@@ -265,13 +321,48 @@ def w_model(f_um, b_u, b_r,
     sys_ur = 1 + s_uk @ Sys_kr
     w_ur = jnp.einsum('um,u,r,mr,ur->ur', f_um, b_u, b_r, A_mr, sys_ur) \
          + jnp.einsum('um, r, u, mr->ur', f_um, b_r, alpha_u, Mu_mr) \
-         + jnp.einsum('um, ra, r, u, mr->ur', f_um, alpha_r_basis, ar, b_u, Mr_mr)
+         + jnp.einsum('um, ra, a, u, mr->ur', f_um, alpha_r_basis, ar, b_u, Mr_mr)
     return w_ur
         
+def concatenate_surveys(s1,s2):
+    '''Concatenate quantities from two different redshift reference surveys
+    into one.  Each input is a dictionary containing arrays for
+    `b_r, alpha_r_basis, ar0, sigma_ar, Sys_kr, sigma_s_uk, w, Sw,`
+    `A_mr, Mu_mr, Mr_mr.`  The output is another dictionary for
+    which the `r,` `a`, and `k` axes have been concatenated.'''
+    out = {}
+    for k in ('b_r', 'ar0', 'sigma_ar'):
+        # Concatenate on the first axis
+        out[k] = jnp.concatenate( (s1[k], s2[k]), axis=0)
 
-def logpwz(f_um, b_u, b_r,
+    # Concatenate on 2nd axis
+    for k in ('sigma_s_uk', 'w', 'A_mr', 'Mu_mr', 'Mr_mr'):
+        # Concatenate on the first axis
+        out[k] = jnp.concatenate( (s1[k], s2[k]), axis=1)
+
+    # Concatenate both axis - block matrix output
+    for k in ('alpha_r_basis', 'Sys_kr'):
+        nx,ny = s1[k].shape
+        t = np.zeros( (nx+s2[k].shape[0], ny+s2[k].shape[1]), dtype=float)
+        t[:nx, :ny] = s1[k]
+        t[nx:, ny:] = s2[k]
+        out[k] = jnp.array(t)
+
+    # Fill blocks for a merged Sw
+    k = 'Sw'
+    n1 = s1[k].shape[1]
+    Nr = s1[k].shape[1] + s2[k].shape[1]
+    Nu = s1[k].shape[0]
+    t = np.zeros( (Nu,Nr,Nr), dtype=float)
+    t[:,:n1,:n1] = s1[k]
+    t[:,n1:,n1:] = s2[k]
+    out[k] = jnp.array(t)
+
+    return out
+
+def logpwz(f_um, b_u,
            alpha_u0, sigma_alpha_u, 
-           alpha_r_basis, ar0, sigma_ar,
+           b_r, alpha_r_basis, ar0, sigma_ar,
            Sys_kr, sigma_s_uk, 
            w, Sw,
            A_mr, Mu_mr, Mr_mr,
