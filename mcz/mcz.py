@@ -163,12 +163,11 @@ def logpspec(psz, psB, cs, a, Delta_s):
 def sys_basis(zr0, dzr, Nr,
               Nk):
     '''Create a matrix of shape (Nk, Nr) giving the value of the Sys(z_r) basis functions
-    at each reference redshift r.  Note that the coefficients at k=0 are actually
-    coming from the degree=1 Legendre polynomial, i.e. the constant is skipped.
+    at each reference redshift r.  
     Arguments:
     `zr0, dzr`:  Central redshift of first reference bin and increment between them
     `Nr`:        Number of reference bins
-    `Nk`:        Number of terms (order) of the systematic error function S_k(r)
+    `Nk`:        Number of terms (=polynomial order +1) of the systematic error function S_k(r)
     Returns:
     `Sys_kr`:    JAX device array of systematic-adjustment terms.'''
 
@@ -182,7 +181,7 @@ def sys_basis(zr0, dzr, Nr,
     ak = np.sqrt(2*np.arange(Nk)+1) / 0.85
 
     # Build coeffs from Legendre - skip the constant
-    out = np.array( [ak[k] * eval_legendre(k+1, u) for k in range(Nk)] )
+    out = np.array( [ak[k] * eval_legendre(k, u) for k in range(Nk)] )
 
     return jnp.array(out)
 
@@ -300,21 +299,18 @@ def prep_cov_w(cov_w):
     Sw = jnp.einsum('ur,usr->urs',s**(-0.5), U)  # indexed by (u,r,r') now.
     return Sw
 
-def prep_cov_w_dense(cov_w):
+def prep_cov_w_dense(cov_w,Nu,Nr):
     '''Get the inverse square root of w covariance for each u, which is the form
     we need for logpwz (D_q^-1 * U^T_w in notes).
     This version assumes the cov matrix is fully populated and is
-    provided (and Sw returned) with shape (Nu,Nu,Nr,Nr)'''
+    provided as (Nu*Nr, Nu*Nr),
+    and Sw will be returned with shape (Nu,Nu,Nr,Nr)'''
     
-    # Reshape matrix to be dense
-    Nu = cov_w.shape[0]
-    Nr = cov_w.shape[1]
-    c = jnp.swapaxes(cov_w, 2, 1).reshape(Nu*Nr, Nu*Nr)
     # Take eigenvals/vecs 
     s,U = jnp.linalg.eigh(cov_w)
     # Sw is a "square root" of inverse of cov_w, so cov_w^{-1} = Sw.T @ Sw
     Sw = jnp.einsum('r,sr->rs',s**(-0.5), U)  # indexed by (ur,u'r') now.
-    Sw = jnp.swapaxes(Sw,2,1).reshape(Nu,Nu,Nr,Nr) # Now indexed by (u,u',r,r')
+    Sw = jnp.swapaxes(Sw.reshape(Nu,Nr,Nu,Nr),2,1) # Now indexed by (u,u',r,r')
     return Sw
 
 def prep_cov_w_diagr(cov_w):
@@ -365,10 +361,11 @@ def concatenate_surveys(s1,s2):
     '''Concatenate quantities from two different redshift reference surveys
     into one.  Each input is a dictionary containing arrays for
     `b_r, alpha_r_basis, ar0, sigma_ar, Sys_kr, sigma_s_uk, w, Sw,`
-    `A_mr, Mu_mr, Mr_mr.`  The output is another dictionary for
-    which the `r,` `a`, and `k` axes have been concatenated.'''
+    `A_mr, Mu_mr, Mr_mr, z_r.`  The output is another dictionary for
+    which the `r,` `a`, and `k` axes have been concatenated.
+    Any `alpha_u0,sigma_alpha_u` arguments are forwarded to output too.'''
     out = {}
-    for k in ('b_r', 'ar0', 'sigma_ar'):
+    for k in ('b_r', 'ar0', 'sigma_ar', 'z_r'):
         # Concatenate on the first axis
         out[k] = jnp.concatenate( (s1[k], s2[k]), axis=0)
 
@@ -384,6 +381,17 @@ def concatenate_surveys(s1,s2):
         t[:nx, :ny] = s1[k]
         t[nx:, ny:] = s2[k]
         out[k] = jnp.array(t)
+
+    for k in ('alpha_u0','sigma_alpha_u'):
+        if k in s1:
+            if k in s2:
+                if not np.all(np.isclose(s1[k],s2[k])):
+                    raise ValueError('s1 and s2 have differing {:s}:'.format(k) \
+                                         + str(s1[k]) + ' vs ' + str(s2[k]))
+            out[k] = s1[k]
+        elif k in s2:
+            out[k] = s2[k]
+                                         
 
     # Fill blocks for a merged Sw, assuming no cross-survey covariance.
     # Depends on what kind of covariances we have...
@@ -421,7 +429,7 @@ def logpwz(f_um, b_u,
            b_r, alpha_r_basis, ar0, sigma_ar,
            Sys_kr, sigma_s_uk, 
            w, Sw,
-           A_mr, Mu_mr, Mr_mr,
+           A_mr, Mu_mr, Mr_mr, z_r,
            return_qmap=False,
            return_derivs=False):
     '''Calculate the log of the probability of observing wz data, and derivatives.
@@ -540,7 +548,6 @@ def logpwz(f_um, b_u,
     
     IBTB = jnp.eye(Nq)
     iu = jnp.arange(Nu)
-    iar = jnp.arange(Nar)
     # Start with (B0,B0) section
     t1 = jnp.einsum('urk,url->ukl',B0,B0)
     t2 = jnp.zeros( (Nu,Nk,Nu,Nk), dtype=float)
@@ -730,7 +737,7 @@ def logpwz_dense(f_um, b_u,
            b_r, alpha_r_basis, ar0, sigma_ar,
            Sys_kr, sigma_s_uk, 
            w, Sw,
-           A_mr, Mu_mr, Mr_mr,
+           A_mr, Mu_mr, Mr_mr, z_r,
            return_qmap=False,
            return_derivs=False):
     '''Calculate the log of the probability of observing wz data, and derivatives.
@@ -837,7 +844,7 @@ def logpwz_dense(f_um, b_u,
     # Concatenate the parts of B and put into 2d
     B = jnp.concatenate( (B0.reshape(Nu*Nr, Nu*Nk),
                           B1.reshape(Nu*Nr, Nu),
-                          B2.reshape(Nu*Nr, Na)), axis=1)
+                          B2.reshape(Nu*Nr, Nar)), axis=1)
 
 
     # Need to build the matrix IBTB = (I + B^T B)
@@ -857,7 +864,7 @@ def logpwz_dense(f_um, b_u,
     L = jnp.linalg.inv(L)
 
     # Calculate the vector L*B^T*D in three parts
-    LBTD = jnp.einsum('qx,xy,y->q',L, B, Delta.flatten())
+    LBTD = jnp.einsum('qp,yp,y->q',L, B, Delta.flatten())
                          
     logp = -0.5*(logdet + jnp.sum(Delta*Delta) - jnp.sum(LBTD*LBTD))
 
@@ -900,7 +907,14 @@ def logpwz_dense(f_um, b_u,
         B_dbu = jnp.zeros( (Nu,Nr,Nq,Nu), dtype=float)
         tmp = jnp.zeros( (Nu,Nr,Nu,Nk,Nu), dtype=float)
         iu = jnp.arange(Nu)
-        tmp = tmp.at[:,:,iu,:,iu].set(B0_dbu)
+        ## !!! Something very trick here: when two "advanced indices" (=arrays)
+        ## are separated by a slice, the "advanced" index is promoted to
+        ## be first in the array, whereas when they are consecutive,
+        ## the advanced index retains its order.
+        ## So tmp.at[:,:,iu,:,iu,:] does *not* do what we expect.
+        ## It needs input with the iu index *first*.
+        ## https://numpy.org/doc/stable/user/basics.indexing.html#combining-advanced-and-basic-indexing
+        tmp = tmp.at[:,:,iu,:,iu].set(jnp.moveaxis(B0_dbu,3,0))
         B_dbu = B_dbu.at[:,:,:N1,:].set(tmp.reshape(Nu,Nr,N1,Nu))
         B_dbu = B_dbu.at[:,:,N2:,:].set(B2_dbu)
         B_dbu = B_dbu.reshape(Nu*Nr, Nq, Nu)
@@ -909,7 +923,8 @@ def logpwz_dense(f_um, b_u,
         # Fill in the parts of dB/df
         B_df = jnp.zeros( (Nu,Nr,Nq,Nu,Nm), dtype=float)
         tmp = jnp.zeros( (Nu,Nr,Nu,Nk,Nu,Nm), dtype=float)
-        tmp = tmp.at[:,:,iu,:,iu,:].set(B0_df)        
+        ## See note above.
+        tmp = tmp.at[:,:,iu,:,iu,:].set(jnp.moveaxis(B0_df,3,0))
         B_df = B_df.at[:,:,:N1,:,:].set(tmp.reshape(Nu,Nr,N1,Nu,Nm))
         
         tmp = jnp.zeros( (Nu,Nr,Nu,Nu,Nm), dtype=float)
@@ -917,21 +932,20 @@ def logpwz_dense(f_um, b_u,
         B_df = B_df.at[:,:,N1:N2,:,:].set(tmp)
          
         B_df = B_df.at[:,:,N2:,:,:].set(B2_df)
-        B_df = B_df.reshape(Nu*Nr, Nq, Nu*Nm)
+        B_df = B_df.reshape(Nu*Nr, Nq, Nu,Nm)
                                             
         # Then B^T * Delta_df which will be indexed by (q,x), dotted into LTLBTD
-        logp_df = logp_df + jnp.einsum('q,xq,xvm->vm',LTLBTD, B, Delta_df.reshape(Nu*Nr,Nu*Nm))
+        logp_df = logp_df + jnp.einsum('q,xq,xvm->vm',LTLBTD, B, Delta_df.reshape(Nu*Nr,Nu,Nm))
 
         # dbu
         logp_dbu = logp_dbu + jnp.einsum('q,xq,xu->u',LTLBTD, B, Delta_dbu.reshape(Nu*Nr,Nu))
 
         # Then B^T_df * Delta which will be indexed by (q,x), dotted into LTLBTD
-        logp_df = logp_df + jnp.einsum('q,xqum,x->um',LTLBTD, B_df, Delta) 
+        logp_df = logp_df + jnp.einsum('q,xqum,x->um',LTLBTD, B_df, Delta.flatten()) 
 
         # dbu
-        logp_dbu = logp_dbu + jnp.einsum('q,xqu,xu->u',LTLBTD, B_dbu, Delta) 
+        logp_dbu = logp_dbu + jnp.einsum('q,xqu,x->u',LTLBTD, B_dbu, Delta.flatten()) 
 
-        ### 
         ## Now need B^T_df B + B^T B_df
         # This will need dimensions (q,q,u,m), and we'll split q into its 3 parts.
         BTB_df = jnp.einsum('xqum,xp->pqum',B_df, B)  # (q,q',u,m) output indices
