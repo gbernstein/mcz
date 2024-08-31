@@ -10,14 +10,18 @@ from scipy.interpolate import interp1d
 from scipy.optimize import minimize
 import sys
 import argparse
+from importlib.resources import files
 
-def run(startk, nk):
-    datadir = "./data/"
+pkg = files("mcz")
+bossFile = pkg / "data" / "Metadetect_BOSS_WZ_28august.pickle"
+rmFile = pkg / "data" / "Metadetect_RM_WZ_28august.pickle"
+wdmFile = pkg / "data" / "ccl_wdm.npz"
 
-
+def run(startk, nk,
+        boyanFile = 'combined_nz_samples_y6_RU_ZPU_LHC_fullZ_1e4_sum1_stdRUmethod_Aug26.h5'):
 
     # Read Boyan's files
-    pz = h5py.File(os.path.join(datadir,'combined_nz_samples_y6_RU_ZPU_LHC_fullZ_1e4_sum1_stdRUmethod_Aug26.h5'))
+    pz = h5py.File(boyanFile)
     pzsamp = jnp.stack( [jnp.array(pz['bin{:d}'.format(i)]) for i in range(4)], axis = 0)
     zzz = np.array(pz['zbins'])
     # Make triangular kernel set
@@ -28,7 +32,7 @@ def run(startk, nk):
 
     # Read fiducial cosmology integrals
 
-    tmp = np.load(open(os.path.join(datadir,'ccl_wdm.npz'),'rb'))
+    tmp = np.load(wdmFile.open('rb'))
 
     wdm = interp1d(tmp['z'], tmp['wdm'], kind='cubic',bounds_error=False, fill_value=(tmp['wdm'][0],tmp['wdm'][-1]))
     c_over_H = interp1d(tmp['z'], tmp['c_over_H'], kind='cubic',bounds_error=False, 
@@ -41,7 +45,7 @@ def run(startk, nk):
     #### Read William's WZ data and other parameters
 
     # Data using BOSS as reference 
-    bossdata = pkl.load(open(os.path.join(datadir,'Metadetect_BOSS_WZ_28august.pickle'), 'rb'))
+    bossdata = pkl.load(bossFile.open('rb'))
     boss = {}
 
     zr = bossdata['z Boss WZ']
@@ -100,7 +104,7 @@ def run(startk, nk):
     boss['Mr_mr'] = Mr
 
     # Now read RM data
-    rmdata = pkl.load(open(os.path.join(datadir,'Metadetect_RM_WZ_28august.pickle'), 'rb'))
+    rmdata = pkl.load(rmFile.open('rb'))
 
     rm = {}
     # Redmagic differs because each reference bin is a sum over other bins, with this 
@@ -199,7 +203,7 @@ def run(startk, nk):
             print('done',i)
     return np.array(logp), np.array(bu)
 
-if __name__=='__main__':
+def go():
     # Collect arguments for function from command line
 
     parser = argparse.ArgumentParser(description='''Assign b_u-optimized WZ probabilities to 3sDir samples''')
@@ -212,3 +216,6 @@ if __name__=='__main__':
     np.savez('boyan_{:03d}_{:03d}'.format(args.startk, args.nk), logp=logp, bu=bu)
 
     sys.exit(0)
+
+if __name__=='__main__':
+    go()
