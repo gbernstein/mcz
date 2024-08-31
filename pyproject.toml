@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcz"
+version = "0.1.1"
+requires-python = ">= 3.10"
+dependencies = [
+    "requests",
+    "numpy>=1.24.1",
+    "scipy>=1.10",
+    "jax>=0.4.9"]
+authors = [
+  {name = "Gary Bernstein", email = "garyb@upenn.edu"},
+  {name = "William Doumerg"}]
+description = "Python module for assigning likelihoods to PZ/WZ data"
+readme = "README.md"
+license = {text = "BSD License"}
+
+[tool.setuptools.packages.find]
+#where = ["mcz"]
+#namespaces=false
+#exclude=['data']
+
+[tool.setuptools.package-data]
+"mcz.data" = ["*"]
+
+[project.scripts]
+wz_boyan = "mcz.scripts.wz_boyan:go"
