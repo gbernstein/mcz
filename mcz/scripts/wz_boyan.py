@@ -22,13 +22,13 @@ def run(startk, nk,
 
     # Read Boyan's files
     pz = h5py.File(boyanFile)
-    pzsamp = jnp.stack( [jnp.array(pz['bin{:d}'.format(i)]) for i in range(4)], axis = 0)
+    pzsamp = np.stack( [jnp.array(pz['bin{:d}'.format(i)]) for i in range(4)], axis = 0)
     zzz = np.array(pz['zbins'])
     # Make triangular kernel set
     pzK = mcz.Tz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
     # Free memory
     del pz
-    pzsamp = pzsamp[:,startk*1000:(startk+nk)*1000,:]  # Just for now
+    pzsamp = jnp.array(pzsamp[:,startk*1000:(startk+nk)*1000,:])  # Keep what we need
 
     # Read fiducial cosmology integrals
 
@@ -195,12 +195,12 @@ def run(startk, nk,
 
     logp = []
     bu = []
-    for i in range(10000):
+    for i in range(pzsamp.shape[1]):
         out = optimize_bu(pzsamp[:,i,:], allSpec)
         logp.append(out[0])
         bu.append(out[1])
         if i%100==0:
-            print('done',i)
+            print('done',i+startk*1000)
     return np.array(logp), np.array(bu)
 
 def go():
@@ -211,6 +211,7 @@ def go():
     parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
     args = parser.parse_args()
 
+    print('Doing',args.startk, args.nk)
     logp, bu = run(args.startk, args.nk)
     # Save data to a file
     np.savez('boyan_{:03d}_{:03d}'.format(args.startk, args.nk), logp=logp, bu=bu)
