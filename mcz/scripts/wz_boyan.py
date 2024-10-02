@@ -1,207 +1,193 @@
 #!/usr/bin/env python
 import numpy as np
-import pickle as pkl
+import matplotlib.pyplot as pl
+from glob import glob
 import mcz
-import os
 import jax
+jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+
 import h5py
 from scipy.interpolate import interp1d
-from scipy.optimize import minimize
+import os
 import sys
 import argparse
+
 from importlib.resources import files
 
 pkg = files("mcz")
-bossFile = pkg / "data" / "Metadetect_BOSS_WZ_28august.pickle"
-rmFile = pkg / "data" / "Metadetect_RM_WZ_28august.pickle"
+bossFile = pkg / "data" / "Metadetect_BOSS_WZ_18sept.pickle"
+rmFile = pkg / "data" / "Metadetect_RM_WZ_18sept.pickle"
+qsoFile = pkg / "data" / "Metadetect_QSO_WZ_18sept.pickle"
 wdmFile = pkg / "data" / "ccl_wdm.npz"
 
-def run(startk, nk,
-        boyanFile = 'combined_nz_samples_y6_RU_ZPU_LHC_fullZ_1e4_sum1_stdRUmethod_Aug26.h5'):
-
-    # Read Boyan's files
-    pz = h5py.File(boyanFile)
-    pzsamp = np.stack( [jnp.array(pz['bin{:d}'.format(i)]) for i in range(4)], axis = 0)
-    zzz = np.array(pz['zbins'])
-    # Make triangular kernel set
-    pzK = mcz.Tz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
-    # Free memory
-    del pz
-    pzsamp = jnp.array(pzsamp[:,startk*1000:(startk+nk)*1000,:])  # Keep what we need
-
-    # Read fiducial cosmology integrals
-
+def integrals(kernels, wzdata, wdmFile=wdmFile):
+    '''Compute the necessary cosmological factors for WZ
+    using the fiducial distance/power estimates in wdmFile.
+    The code will detect whether (like RedMagic) the WZ reference
+    bins are actually distributed over a set of kernel elements.
+    Arguments:
+    `kernels` is an array of kernels for the unknowns' n(z).
+    `wzdata`  is either a single dict-like of WZ data specifications,
+              or a list of several to be done consecutively.
+    `wdmFile` holds the precomputed cosmological functions of z.
+    Returns:
+    None - each dictionary is updated with `A_mr, Mu_mr, Mr_mr` entries.'''
+    
+    # Read fiducial cosmology integrals                                                                                        
     tmp = np.load(wdmFile.open('rb'))
 
     wdm = interp1d(tmp['z'], tmp['wdm'], kind='cubic',bounds_error=False, fill_value=(tmp['wdm'][0],tmp['wdm'][-1]))
-    c_over_H = interp1d(tmp['z'], tmp['c_over_H'], kind='cubic',bounds_error=False, 
+    c_over_H = interp1d(tmp['z'], tmp['c_over_H'], kind='cubic',bounds_error=False,
                             fill_value=(tmp['c_over_H'][0],tmp['c_over_H'][-1]))
     x = np.concatenate( (np.array([0.,]),tmp['z']))
     y = np.concatenate( (np.array([0.,]),tmp['cda']))
     cda = interp1d(x,y, kind='cubic',bounds_error=False, fill_value=(y[0],y[-1]))
-
-
-    #### Read William's WZ data and other parameters
-
-    # Data using BOSS as reference 
-    bossdata = pkl.load(bossFile.open('rb'))
-    boss = {}
-
-    zr = bossdata['z Boss WZ']
-    zr0 = zr[0]
-    dzr = zr[1]-zr[0]
-    Nr = len(zr)
-    boss['z_r'] = np.array(zr)  # Save z_r values for plotting purposes
-
-    # Correlation data:
-    boss['w'] = jnp.array(bossdata['w_ur Boss bin1--4'])
-    Nu = boss['w'].shape[0]
-    print('BOSS Nr:',Nr, 'w shape:',boss['w'].shape)
-    cov_w = np.array(bossdata['Full-Cov noisy w_ur BOSS(with Hartlap)'])
-    # Reshape the dense covariance matrix
-    boss['Sw'] = mcz.prep_cov_w_dense(cov_w,Nu,Nr)
-    print('Sw shape:',boss['Sw'].shape)
-      
-    # Assign a nominal bias to each u
-    b_u = jnp.ones( Nu, dtype=float) * 1.1
-
-    # And unkowns' magnification priors
-    alpha0, sig = bossdata['alpha_meta [mu,sigma]']
-    boss['alpha_u0'] = jnp.ones(Nu, dtype=float) * alpha0
-    boss['sigma_alpha_u'] = jnp.ones(Nu, dtype=float) * sig  
-
-    # Collect reference info
-    boss['b_r']= jnp.array(bossdata['br Boss'])
-
-    # Read the sigmas on the Sys coefficients. 
-    sig = np.array(bossdata['Sys [s_uk]_k'])
-    # !!! Set the constant terms' sigma to smaller value since
-    # largely degenerate with bias
-    sig[:,0] = 0.1
-    # Also set sigmas to a positive minimum to avoid possible ugliness
-    # with sigma=0
-    sig = np.maximum(sig,0.001)
-    boss['sigma_s_uk'] = jnp.array(sig)
-    Nk = boss['sigma_s_uk'].shape[1]
-
-    boss['Sys_kr'] = mcz.sys_basis(zr0,dzr,Nr,Nk)
-
-    # Make alpha_r a single value
-    boss['alpha_r_basis'] = jnp.ones((Nr,1), dtype=float)
-    alpha0, sig = bossdata['alpha_boss [mu,sigma]']
-    boss['ar0'] = jnp.array([alpha0,])
-    boss['sigma_ar'] = jnp.array([sig])
-
-    print('Nk:',Nk,'sys priors:',boss['sigma_s_uk'])
-
-    ## Do the cosmological integrals for its bins
-    A, Mu, Mr = mcz.prep_wz_integrals(pzK,
-                                      zr0, dzr, Nr,
-                                      cda, c_over_H, wdm)
-    boss['A_mr'] = A
-    boss['Mu_mr'] = Mu
-    boss['Mr_mr'] = Mr
-
-    # Now read RM data
-    rmdata = pkl.load(rmFile.open('rb'))
-
-    rm = {}
-    # Redmagic differs because each reference bin is a sum over other bins, with this 
-    # matrix:
-    rmnz = jnp.array(rmdata['RM n(z) from BOSS WZ'])
-    # summing over these "original" bins:
-    rmz = rmdata['z array for RM n(z)']
-    rmnz = rmnz / np.sum(rmnz, axis=1)[:,np.newaxis]
-    zr0 = rmz[0]
-    dzr = rmz[1]-rmz[0]
-    Nr = len(rmz)
-
-    rm['z_r'] = np.array(rmz)  # Save z_r values for plotting purposes
-
-    # Do the cosmological integrals in the original bins
-    A, Mu, Mr = mcz.prep_wz_integrals(pzK,
-                                          zr0, dzr, Nr,
-                                          cda, c_over_H, wdm)
-    # Then average them over the n(z)'s of the RM bins
-    rm['A_mr'] = jnp.einsum('mr,sr->ms',A, rmnz)
-    rm['Mu_mr'] = jnp.einsum('mr,sr->ms',Mu, rmnz)
-    rm['Mr_mr'] = jnp.einsum('mr,sr->ms',Mr, rmnz)
-
-    # Now assign nominal z's to the RM bins:
-    zr = rmdata['z RM WZ']
-    zr0 = zr[0]
-    dzr = zr[1]-zr[0]
-    Nr = len(zr)
-
-    # Correlation data:
-    rm['w'] = jnp.array(rmdata['w_ur RM bin1--4'])
-
-    cov_w = np.array(rmdata['Full-Cov w_ur RM(with Hartlap)'])
-    rm['Sw'] = mcz.prep_cov_w_dense(cov_w,Nu,Nr)
-
-    # And unkowns' magnification priors
-    alpha0, sig = rmdata['alpha_meta [mu,sigma]']
-    rm['alpha_u0'] = jnp.ones(Nu, dtype=float) * alpha0
-    rm['sigma_alpha_u'] = jnp.ones(Nu, dtype=float) * sig  
-
-    # Collect reference info
-    rm['b_r']= jnp.array(rmdata['br '])
-
-    # Read the sigmas on the Sys coefficients. 
-    sig = np.array(rmdata['Sys [s_uk]_k'])
-    # Set sigmas to a positive minimum to avoid possible ugliness
-    # with sigma=0
-    sig = np.maximum(sig,0.001)
-    rm['sigma_s_uk'] = jnp.array(sig)
-    Nk = rm['sigma_s_uk'].shape[1]
-
-    rm['Sys_kr'] = mcz.sys_basis(zr0,dzr,Nr,Nk)
-
-    # Make alpha_r a single value
-    rm['alpha_r_basis'] = jnp.ones((Nr,1), dtype=float)
-    alpha0, sig = rmdata['alpha_red [mu,sigma]']
-    rm['ar0'] = jnp.array([alpha0,])
-    rm['sigma_ar'] = jnp.array([sig])
-
-    # Concatenate two surveys into one set of arrays
-    allSpec = mcz.concatenate_surveys(boss,rm)
-
-    # Probability maximization over b_u
-    logpwz = jax.jit(mcz.logpwz_dense, static_argnames=['return_qmap','return_derivs'])
-
-    def optimize_bu(f_um, survey, b_u=np.ones(Nu) * 1.1):
-        '''Find values of b_u that maximize the probability
-        of the WZ data under the n(z) given by f_um.
-        Arguments:
-        `f_um`: Array of shape (Nu,Nm) specifying n(z)
-        `survey`: Dictionary of WZ data/priors arguments
-        needed by `mcz.logpwz` function
-        `b_u`:  Starting values of bin biases.
-        Returns:
-        `logp`: Log of maximized probability
-        `b_u`:  Maximizing bias values '''
     
-        def func(b_u):
-            '''Function to be minimized - return -log p and
-            its gradient w.r.t. b_u'''
-            logp, derivs = logpwz(f_um, jnp.array(b_u),
-                                      **allSpec,
-                                      return_derivs=True)
-            return -logp, -derivs[1]
+    if type(wzdata) is not list:
+        wzdata = [wzdata]
 
-        out = minimize(func, b_u, jac=True, method='BFGS', options={'xrtol':0.01})
-        return -out.fun, out.x
+    # Now do calculations for each wz dict:
+    for wz in wzdata:
+        ## Do the cosmological integrals for bins                                                                              
+        if 'dndz' in wz:
+            # This set of reference bins is mapped into rectangular bins
+            # Now assign nominal z's to the RM bins:  
+            dndz = wz['dndz']
+            zr = wz['z_dndz']
+            zr0 = zr[0]
+            dzr = zr[1]-zr[0]
+            Nr = len(zr)    # This is number of the rectangular bins
+            A, Mu, Mr = mcz.prep_wz_integrals(pzK,
+                                              zr0, dzr, Nr,
+                                              cda, c_over_H, wdm)
+            # Then average each ref bin over its n(z) of rectangular bins
+            wz['A_mr'] = jnp.einsum('mr,sr->ms',A, dndz)
+            wz['Mu_mr'] = jnp.einsum('mr,sr->ms',Mu, dndz)
+            wz['Mr_mr'] = jnp.einsum('mr,sr->ms',Mr, dndz)
+            
+        else:
+            # Reference bins are in discrete redshift bins
+            zr = wz['z_r']
+            zr0 = zr[0]
+            dzr = zr[1]-zr[0]
+            Nr = len(zr)
+            A, Mu, Mr = mcz.prep_wz_integrals(kernels,
+                                              zr0, dzr, Nr,
+                                              cda, c_over_H, wdm)
+            wz['A_mr'] = A
+            wz['Mu_mr'] = Mu
+            wz['Mr_mr'] = Mr
+    return
 
-    logp = []
-    bu = []
-    for i in range(pzsamp.shape[1]):
-        out = optimize_bu(pzsamp[:,i,:], allSpec)
-        logp.append(out[0])
-        bu.append(out[1])
-        if i%100==0:
-            print('done',i+startk*1000)
-    return np.array(logp), np.array(bu)
+def _opt_blockR(f_um, wzdata, feedback=0.8, iterations=10,
+                b_u = jnp.array([0.9,1.2,1.4,1.3])):
+    '''Do fixed number of iterations of very dumb Newton iteration
+    on the b_u values, then return logp and b_u values.
+    Version for block-R covW matrix.'''
+
+    db = 0.02  # Increment for numerical Hessian
+    db_max = 0.3 # Biggest step allowed for any iteration of b_u
+    n = b_u.shape[0]
+
+    for i in range(iterations):
+        logp, dbu = mcz.logpwz_blockR(f_um, b_u,
+                                      **wzdata,
+                                      return_dbu=True)
+        # Build a Hessian crudely:
+        H = jnp.zeros( (n,n), dtype=float)
+        for j in range(n):
+            b = b_u.at[j].add(db)
+            dp = mcz.logpwz_blockR(f_um, b, **wzdata,return_dbu=True)[1]
+            b = b_u.at[j].add(db)
+            H = H.at[j].set((dp - dbu)/db)
+        evals, evecs = jnp.linalg.eigh(H)
+        # Only shift in eigen-directions that are concave in logp
+        inv_evals = jnp.where(evals<0, 1/evals, 0)
+        shift = -jnp.einsum('ij,j,kj,k->i',evecs,inv_evals,evecs,dbu)
+        factor = jnp.max(jnp.abs(shift/db_max))
+        factor = jnp.minimum(1/factor, feedback)
+        b_u = b_u + factor*shift
+    logp_final = mcz.logpwz_blockR(f_um, b_u,**wzdata)[0]
+    return logp_final, logp_final-logp, b_u
+
+
+def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
+          b_u = jnp.array([0.9,1.2,1.4,1.3])):
+    '''Do fixed number of iterations of very dumb Newton iteration
+    on the b_u values, then return logp and b_u values.
+    Version for dense covW matrix.'''
+    db = 0.02  # Increment for numerical Hessian
+    db_max = 0.3 # Biggest step allowed for any iteration of b_u
+    n = b_u.shape[0]
+
+    for i in range(iterations):
+        logp, dbu = mcz.logpwz_dense(f_um, b_u,
+                                      **wzdata,
+                                      return_dbu=True)
+        # Build a Hessian crudely:
+        H = jnp.zeros( (n,n), dtype=float)
+        for j in range(n):
+            b = b_u.at[j].add(db)
+            dp = mcz.logpwz_dense(f_um, b, **wzdata,return_dbu=True)[1]
+            b = b_u.at[j].add(db)
+            H = H.at[j].set((dp - dbu)/db)
+        evals, evecs = jnp.linalg.eigh(H)
+        # Only shift in eigen-directions that are concave in logp
+        inv_evals = jnp.where(evals<0, 1/evals, 0)
+        shift = -jnp.einsum('ij,j,kj,k->i',evecs,inv_evals,evecs,dbu)
+        factor = jnp.max(jnp.abs(shift/db_max))
+        factor = jnp.minimum(1/factor, feedback)
+        b_u = b_u + factor*shift
+        logp_final = mcz.logpwz_dense(f_um, b_u,**wzdata)[0]
+    return logp_final, logp_final-logp, b_u
+
+def run(startk, nk,
+        boyanFile = 'boyan_100M_Sep2.h5',
+        useRM=True):
+    '''Calculate log(p) of WZ measurements for each of samples in
+    Boyan's 3sDir sample file.  Rows of Boyan's table to use are
+    specified in `startk,nk`.  `useRM` determines whether to add
+    RedMagic data to BOSS+QSO data.
+    Returns arrays of logp per sample, and b_u that optimize logp.'''
+    
+    if useRM:
+        opt_bu = jax.jit(jax.vmap(_opt_dense, in_axes=(0,None), out_axes=0))
+    else:
+        opt_bu = jax.jit(jax.vmap(_opt_blockR, in_axes=(0,None), out_axes=0))
+    # Read Boyan's files                                                                                                       
+    pz = h5py.File(boyanFile)
+    pzsamp = np.stack( [pz['bin{:d}'.format(i)][startk*1000,(startk+nk)*1000,:] for i in range(4)], axis = 1)
+
+    # Make triangular kernel set                                                                                               
+    zzz = np.array(pz['zbins'])
+    pzK = mcz.Tz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
+    # Free memory and close HDF5 file
+    del pz
+
+    # Open the WZ data files for BOSS and QSO
+    b = {k:jnp.array(v) for k,v in np.load('boss_18sep.npz').items()}
+    q = {k:jnp.array(v) for k,v in np.load('qso_18sep.npz').items()}
+
+    # Combine info from all spectro
+    wz = mcz.concatenate_surveys(b,q)
+    # Add RedMagic if desired:
+    if useRM:
+        r = {k:jnp.array(v) for k,v in np.load('rm_18sep.npz').items()}
+        # Compute cosmological integrals
+        integrals(pzK, r)
+        wz = mcz.concatenate_surveys(wz,r)
+
+        out = []
+        chunk = 1000
+        for start in range(0,pzsamp.shape[1],chunk):
+            print('Start',start)
+            ff = np.moveaxis(,:],1,0)
+            out.append(opt_bu(pzsamp[start:start+chunk], wz))
+        logp = np.concatenate([o[0] for o in out])
+        dlogp = np.concatenate([o[1] for o in out], axis=0)
+        b_u = np.concatenate([o[2] for o in out], axis=0)
+
 
 def go():
     # Collect arguments for function from command line
@@ -209,12 +195,14 @@ def go():
     parser = argparse.ArgumentParser(description='''Assign b_u-optimized WZ probabilities to 3sDir samples''')
     parser.add_argument('startk', help='First sample to use (in thousands)', type=int, default=0)
     parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
+    parser.add_argument('--useRM', help='Include RedMagic WZ data or just BOSS+QSO?', type=bool, default=True)
+    parser.add_argument('-o,--out', help='Output npz file prefix', type=str, default='boyan_wz')
     args = parser.parse_args()
 
     print('Doing',args.startk, args.nk)
-    logp, bu = run(args.startk, args.nk)
+    logp, _, bu = run(args.startk, args.nk, useRM=useRM)
     # Save data to a file
-    np.savez('boyan_{:03d}_{:03d}'.format(args.startk, args.nk), logp=logp, bu=bu)
+    np.savez(args.out + '_{:03d}_{:03d}'.format(args.startk, args.nk), logp=logp, bu=bu)
 
     sys.exit(0)
 
