@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 import numpy as np
-import matplotlib.pyplot as pl
-from glob import glob
 import mcz
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -58,7 +56,7 @@ def integrals(kernels, wzdata, wdmFile=wdmFile):
             zr0 = zr[0]
             dzr = zr[1]-zr[0]
             Nr = len(zr)    # This is number of the rectangular bins
-            A, Mu, Mr = mcz.prep_wz_integrals(pzK,
+            A, Mu, Mr = mcz.prep_wz_integrals(kernels,
                                               zr0, dzr, Nr,
                                               cda, c_over_H, wdm)
             # Then average each ref bin over its n(z) of rectangular bins
@@ -157,7 +155,8 @@ def run(startk, nk,
         opt_bu = jax.jit(jax.vmap(_opt_blockR, in_axes=(0,None), out_axes=0))
     # Read Boyan's files                                                                                                       
     pz = h5py.File(boyanFile)
-    pzsamp = np.stack( [pz['bin{:d}'.format(i)][startk*1000,(startk+nk)*1000,:] for i in range(4)], axis = 1)
+    pzsamp = np.stack( [pz['bin{:d}'.format(i)][startk*1000:(startk+nk)*1000,:] for i in range(4)], axis = 1)
+    print('pzsamp shape', pzsamp.shape)
 
     # Make triangular kernel set                                                                                               
     zzz = np.array(pz['zbins'])
@@ -168,6 +167,7 @@ def run(startk, nk,
     # Open the WZ data files for BOSS and QSO
     b = {k:jnp.array(v) for k,v in np.load('boss_18sep.npz').items()}
     q = {k:jnp.array(v) for k,v in np.load('qso_18sep.npz').items()}
+    integrals(pzK, [b,q])
 
     # Combine info from all spectro
     wz = mcz.concatenate_surveys(b,q)
@@ -178,16 +178,15 @@ def run(startk, nk,
         integrals(pzK, r)
         wz = mcz.concatenate_surveys(wz,r)
 
-        out = []
-        chunk = 1000
-        for start in range(0,pzsamp.shape[1],chunk):
-            print('Start',start)
-            ff = np.moveaxis(,:],1,0)
-            out.append(opt_bu(pzsamp[start:start+chunk], wz))
-        logp = np.concatenate([o[0] for o in out])
-        dlogp = np.concatenate([o[1] for o in out], axis=0)
-        b_u = np.concatenate([o[2] for o in out], axis=0)
-
+    out = []
+    chunk = 100
+    for start in range(0,pzsamp.shape[0],chunk):
+        print('Start',start)
+        out.append(opt_bu(pzsamp[start:start+chunk], wz))
+    logp = np.concatenate([o[0] for o in out])
+    dlogp = np.concatenate([o[1] for o in out], axis=0)
+    b_u = np.concatenate([o[2] for o in out], axis=0)
+    return logp, dlogp, b_u
 
 def go():
     # Collect arguments for function from command line
@@ -195,12 +194,13 @@ def go():
     parser = argparse.ArgumentParser(description='''Assign b_u-optimized WZ probabilities to 3sDir samples''')
     parser.add_argument('startk', help='First sample to use (in thousands)', type=int, default=0)
     parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
-    parser.add_argument('--useRM', help='Include RedMagic WZ data or just BOSS+QSO?', type=bool, default=True)
-    parser.add_argument('-o,--out', help='Output npz file prefix', type=str, default='boyan_wz')
+    parser.add_argument('--useRM', help='Include RedMagic WZ data or just BOSS+QSO?', action='store_true')
+    parser.add_argument('-o','--out', help='Output npz file prefix', type=str, default='boyan_wz')
     args = parser.parse_args()
+    print(args)
 
     print('Doing',args.startk, args.nk)
-    logp, _, bu = run(args.startk, args.nk, useRM=useRM)
+    logp, _, bu = run(args.startk, args.nk, useRM=args.useRM)
     # Save data to a file
     np.savez(args.out + '_{:03d}_{:03d}'.format(args.startk, args.nk), logp=logp, bu=bu)
 
