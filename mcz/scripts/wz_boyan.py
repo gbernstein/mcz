@@ -11,6 +11,12 @@ import os
 import sys
 import argparse
 
+useMPI = True
+try:
+    from mpi4py import MPI
+except:
+    useMPI = False
+
 from importlib.resources import files
 
 pkg = files("mcz")
@@ -89,14 +95,12 @@ def _opt_blockR(f_um, wzdata, feedback=0.8, iterations=10,
     n = b_u.shape[0]
 
     for i in range(iterations):
-        logp, dbu = mcz.logpwz_blockR(f_um, b_u,
-                                      **wzdata,
-                                      return_dbu=True)
+        logp, dbu = mcz.logpwz_blockR(f_um, b_u, return_dbu=True, **wzdata)
         # Build a Hessian crudely:
         H = jnp.zeros( (n,n), dtype=float)
         for j in range(n):
             b = b_u.at[j].add(db)
-            dp = mcz.logpwz_blockR(f_um, b, **wzdata,return_dbu=True)[1]
+            dp = mcz.logpwz_blockR(f_um, b,return_dbu=True, **wzdata)[1]
             b = b_u.at[j].add(db)
             H = H.at[j].set((dp - dbu)/db)
         evals, evecs = jnp.linalg.eigh(H)
@@ -120,14 +124,12 @@ def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
     n = b_u.shape[0]
 
     for i in range(iterations):
-        logp, dbu = mcz.logpwz_dense(f_um, b_u,
-                                      **wzdata,
-                                      return_dbu=True)
+        logp, dbu = mcz.logpwz_dense(f_um, b_u, return_dbu=True, **wzdata)
         # Build a Hessian crudely:
         H = jnp.zeros( (n,n), dtype=float)
         for j in range(n):
             b = b_u.at[j].add(db)
-            dp = mcz.logpwz_dense(f_um, b, **wzdata,return_dbu=True)[1]
+            dp = mcz.logpwz_dense(f_um, b,return_dbu=True, **wzdata)[1]
             b = b_u.at[j].add(db)
             H = H.at[j].set((dp - dbu)/db)
         evals, evecs = jnp.linalg.eigh(H)
@@ -142,13 +144,25 @@ def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
 
 def run(startk, nk,
         boyanFile = 'boyan_100M_Sep2.h5',
-        useRM=True):
+        useRM=True,
+        chunk=1000):
     '''Calculate log(p) of WZ measurements for each of samples in
     Boyan's 3sDir sample file.  Rows of Boyan's table to use are
     specified in `startk,nk`.  `useRM` determines whether to add
     RedMagic data to BOSS+QSO data.
     Returns arrays of logp per sample, and b_u that optimize logp.'''
     
+    # Split up the job if we have multiple tasks running under MPI
+    if useMPI:
+        comm = MPI.COMM_WORLD
+        size = comm.Get_size()
+        rank = comm.Get_rank()
+        endk = startk + nk
+        nk = (nk-1)//size + 1
+        startk = startk + rank*nk
+        nk = min(nk, endk-startk)
+        print('Rank',rank,'starting at',startk,'doing',nk)
+
     if useRM:
         opt_bu = jax.jit(jax.vmap(_opt_dense, in_axes=(0,None), out_axes=0))
     else:
@@ -179,7 +193,6 @@ def run(startk, nk,
         wz = mcz.concatenate_surveys(wz,r)
 
     out = []
-    chunk = 100
     for start in range(0,pzsamp.shape[0],chunk):
         print('Start',start)
         out.append(opt_bu(pzsamp[start:start+chunk], wz))
@@ -195,12 +208,13 @@ def go():
     parser.add_argument('startk', help='First sample to use (in thousands)', type=int, default=0)
     parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
     parser.add_argument('--useRM', help='Include RedMagic WZ data or just BOSS+QSO?', action='store_true')
+    parser.add_argument('-c','--chunk', help='Samples per dispatch to GPU', type=int,default=1000)
     parser.add_argument('-o','--out', help='Output npz file prefix', type=str, default='boyan_wz')
     args = parser.parse_args()
     print(args)
 
     print('Doing',args.startk, args.nk)
-    logp, _, bu = run(args.startk, args.nk, useRM=args.useRM)
+    logp, _, bu = run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk)
     # Save data to a file
     np.savez(args.out + '_{:03d}_{:03d}'.format(args.startk, args.nk), logp=logp, bu=bu)
 
