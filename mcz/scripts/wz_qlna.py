@@ -173,13 +173,42 @@ def run(startk, nk,
     # Read Boyan's files                                                                                                       
     pz = h5py.File(boyanFile)
     pzsamp = np.stack( [pz['bin{:d}'.format(i)][startk*1000:(startk+nk)*1000,:] for i in range(4)], axis = 1)
-    print('pzsamp shape', pzsamp.shape)
-
-    # Make triangular kernel set                                                                                               
-    zzz = np.array(pz['zbins'])
-    pzK = mcz.Tz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
     # Free memory and close HDF5 file
     del pz
+
+    # Grab the input redshift bin barriers
+    zzz = np.array(pz['zbins'])
+    if dlna is None:
+        # Make triangular kernel set akin to input rectangular
+        pzK = mcz.Tz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
+    else:
+        # We'll be mapping input samples into another basis
+        # The input rectangular bins:
+        pzR = mcz.Rz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
+        # The target output bins
+        nQ = int(np.floor(np.log(zzz[-1]) / dlna)) + 1 # Go past ends of input
+        pzK = mcz.Qlna(nz=nQ, dlna=dlna)
+
+        # Get a transfer matrix to the new basis
+        zrmin = pzR.zbounds()[:,0]
+        zrmax = pzR.zbounds()[:,1]
+        zqmin = pzK.zbounds()[:,0]
+        zqmax = pzK.zbounds()[:,1]
+
+        for iq in range(pzK.nz):
+            for ir in range(pzR.nz):
+                lower = max(zrmin[ir],zqmin[iq])
+                upper = min(zrmax[ir],zqmax[iq])
+            if lower >= upper:
+                continue
+            q2r[ir,iq] = quad( lambda z:r(ir,z)*q(iq,z), lower, upper, epsabs=0.0001)[0]
+        q2r *= pqR.dz
+
+        u,s,vt = np.linalg.svd(q2r, full_matrices=False)
+        r2q = vt.T @ np.diag(np.where(np.abs(s)>1e-4,1/s,0.)) @ u.T
+
+        # Transform into the new basis
+        pzsamp = np.einsum('ijk,lk->ijl', pzsamp, r2q)
 
     # Open the WZ data files for BOSS and QSO
     b = {k:jnp.array(v) for k,v in np.load('boss_18sep.npz').items()}
@@ -203,11 +232,19 @@ def run(startk, nk,
     dlogp = np.concatenate([o[1] for o in out], axis=0)
     b_u = np.concatenate([o[2] for o in out], axis=0)
     if out is None:
-        # Return results
-        return logp, dlogp, b_u
+        if dlna is None:
+            # Return results
+            return logp, dlogp, b_u
+        else:
+            return logp, dlogp, b_u, dlna
     else:
-        # Save data to a file
-        np.savez(args.out + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp)
+        if dlna is None:
+            # Save data to a file
+            np.savez(args.out + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp)
+        else:
+            # Save data to a file
+            np.savez(args.out + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp,
+                 dlna=dlna)
 
 def go():
     # Collect arguments for function from command line
@@ -216,13 +253,14 @@ def go():
     parser.add_argument('startk', help='First sample to use (in thousands)', type=int, default=0)
     parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
     parser.add_argument('--useRM', help='Include RedMagic WZ data or just BOSS+QSO?', action='store_true')
+    parser.add_argument('--dlna', help='d(log a) if using quadratic kernels', type=float)
     parser.add_argument('-c','--chunk', help='Samples per dispatch to GPU', type=int,default=1000)
     parser.add_argument('-o','--out', help='Output npz file prefix', type=str, default='boyan_wz')
     args = parser.parse_args()
     print(args)
 
     print('Doing',args.startk, args.nk)
-    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, out=args.out)
+    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, out=args.out, dlna=args.dlna)
 
     sys.exit(0)
 

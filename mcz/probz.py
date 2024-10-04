@@ -11,27 +11,29 @@ from scipy.special import eval_legendre
 ##################################################################
 
 class Rz:
-    def __init__(self, dz, nz):
+    def __init__(self, dz, nz, startz=0.):
         '''Class representing rectangular n(z) kernels (bins) in z.
         The n(z) will return 0 if evaluated at lower bound, 1/dz at the upper
         bound, so be careful about integrations.
         Arguments:
-        `dz`: the step between bin edges (starting at zero)
-        `nz`: the number of kernels.'''
+        `dz`: the step between bin edges
+        `nz`: the number of kernels.
+        `startz`: lower bound of bin 0.'''
         self.dz = dz
         self.nz = nz
+        self.startz = startz
 
     def __call__(self,k,z):
         '''Evaluate dn/dz for the kernel with index k at an array of
         z values.'''
         # Doing duplicative calculations to make this compatible
         # with JAX arithmetic.
-        inbin = jnp.logical_and( z>k*self.dz, z<=(k+1)*self.dz)
+        inbin = jnp.logical_and( z-self.startz>k*self.dz, z-self.startz<=(k+1)*self.dz)
         return jnp.where(inbin, 1/self.dz, 0.)
         
     def zbounds(self):
         '''Return lower, upper bounds in z of all the bins in (nz,2) array'''
-        zmin = np.arange(self.nz)*self.dz
+        zmin = np.arange(self.nz)*self.dz + self.startz
         zmax = zmin + self.dz
         return np.stack( (zmin, zmax), axis=1)
 
@@ -40,7 +42,7 @@ class Tz:
         '''Class representing triangular n(z) kernels (bins) in z.
         First kernel is centered at startz+dz so it's linear at z=startz.
         Arguments:
-        `dz`: the step between bins (starting at zero)
+        `dz`: the step between bins
         `nz`: the number of kernels.
         `startz`: Lower z limit of first bin'''
         self.dz = dz
