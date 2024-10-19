@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 import h5py
 from scipy.interpolate import interp1d
+from scipy.integrate import quad
 import os
 import sys
 import argparse
@@ -146,7 +147,8 @@ def run(startk, nk,
         boyanFile = 'boyan_100M_Sep2.h5',
         useRM=True,
         chunk=1000,
-        out = None):
+        dlna=None,
+        outFile = None):
     '''Calculate log(p) of WZ measurements for each of samples in
     Boyan's 3sDir sample file.  Rows of Boyan's table to use are
     specified in `startk,nk`.  `useRM` determines whether to add
@@ -173,20 +175,22 @@ def run(startk, nk,
     # Read Boyan's files                                                                                                       
     pz = h5py.File(boyanFile)
     pzsamp = np.stack( [pz['bin{:d}'.format(i)][startk*1000:(startk+nk)*1000,:] for i in range(4)], axis = 1)
-    # Free memory and close HDF5 file
-    del pz
 
     # Grab the input redshift bin barriers
     zzz = np.array(pz['zbins'])
+    # Free memory and close HDF5 file
+    del pz
+
     if dlna is None:
         # Make triangular kernel set akin to input rectangular
         pzK = mcz.Tz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
     else:
         # We'll be mapping input samples into another basis
         # The input rectangular bins:
-        pzR = mcz.Rz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
+        pzR = mcz.Rz(dz=zzz[1]-zzz[0], nz=len(zzz)-1, startz=zzz[0])
         # The target output bins
-        nQ = int(np.floor(np.log(zzz[-1]) / dlna)) + 1 # Go past ends of input
+        nQ = int(np.floor(np.log(1+zzz[-1]) / dlna)) + 1 # Go past ends of input
+        print('lastz:',zzz[-1],'nQ:',nQ)
         pzK = mcz.Qlna(nz=nQ, dlna=dlna)
 
         # Get a transfer matrix to the new basis
@@ -195,20 +199,24 @@ def run(startk, nk,
         zqmin = pzK.zbounds()[:,0]
         zqmax = pzK.zbounds()[:,1]
 
+        q2r = np.zeros((pzR.nz,pzK.nz),dtype=float)
         for iq in range(pzK.nz):
             for ir in range(pzR.nz):
                 lower = max(zrmin[ir],zqmin[iq])
                 upper = min(zrmax[ir],zqmax[iq])
-            if lower >= upper:
-                continue
-            q2r[ir,iq] = quad( lambda z:r(ir,z)*q(iq,z), lower, upper, epsabs=0.0001)[0]
-        q2r *= pqR.dz
+                if lower >= upper:
+                    continue
+                q2r[ir,iq] = quad( lambda z:pzR(ir,z)*pzK(iq,z), lower, upper, epsabs=0.0001)[0]
+        q2r *= pzR.dz
 
         u,s,vt = np.linalg.svd(q2r, full_matrices=False)
-        r2q = vt.T @ np.diag(np.where(np.abs(s)>1e-4,1/s,0.)) @ u.T
+        print('s',s) ####
+        r2q = vt.T @ np.diag(np.where(np.abs(s)>1e-3,1/s,0.)) @ u.T
 
         # Transform into the new basis
         pzsamp = np.einsum('ijk,lk->ijl', pzsamp, r2q)
+        # Renormalize sums
+        pzsamp = pzsamp / np.sum(pzsamp,axis=2)[:,:,np.newaxis]
 
     # Open the WZ data files for BOSS and QSO
     b = {k:jnp.array(v) for k,v in np.load('boss_18sep.npz').items()}
@@ -231,7 +239,7 @@ def run(startk, nk,
     logp = np.concatenate([o[0] for o in out])
     dlogp = np.concatenate([o[1] for o in out], axis=0)
     b_u = np.concatenate([o[2] for o in out], axis=0)
-    if out is None:
+    if outFile is None:
         if dlna is None:
             # Return results
             return logp, dlogp, b_u
@@ -240,10 +248,10 @@ def run(startk, nk,
     else:
         if dlna is None:
             # Save data to a file
-            np.savez(args.out + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp)
+            np.savez(outFile + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp)
         else:
             # Save data to a file
-            np.savez(args.out + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp,
+            np.savez(outFile + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp,
                  dlna=dlna)
 
 def go():
@@ -260,7 +268,7 @@ def go():
     print(args)
 
     print('Doing',args.startk, args.nk)
-    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, out=args.out, dlna=args.dlna)
+    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, outFile=args.out, dlna=args.dlna)
 
     sys.exit(0)
 

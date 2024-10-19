@@ -10,6 +10,21 @@ from scipy.special import eval_legendre
 ### Redshift distribution kernels
 ##################################################################
 
+def evaluateKernel(kernel, coeff, z):
+    '''Transform a set of kernel coefficients into vevaluations of
+    dn/dz at a specified set of redshifts.
+    Arguments:
+    `kernel`: An instance of any of the n(z) kernel classes
+    `coeff`:  An array of shape [...,nk] giving sets of coefficients
+              for the nk elements of the `kernel` class.
+    `z`:      A 1d array of redshifts at which to evaluate dn/dz
+    Returns:
+    Array of dimensions [...,nz] giving the dn/dz values at the redshifts.'''
+    # Build the transformation matrix
+    m = jnp.array([ kernel(k,z) for k in range(kernel.nz)])]
+    # Apply
+    return jnp.einsum('...i,ij->...j',coeff,m)
+
 class Rz:
     def __init__(self, dz, nz, startz=0.):
         '''Class representing rectangular n(z) kernels (bins) in z.
@@ -242,7 +257,7 @@ def prep_wz_integrals(kernels,
             out = np.moveaxis(out,0,axis)
         return out
 
-    dzk = 0.005   # dz for integrating over unknowns' kernels
+    dzk = 0.002   # dz for integrating over unknowns' kernels
 
 
     Nk = kernels.nz
@@ -264,7 +279,7 @@ def prep_wz_integrals(kernels,
         # First the clustering, evaluated at common set of z's
         A[k] = collapse_r(wdm_r * kernels(k,zr))
         # Now the lensing
-        zmin = zbounds[k,0]
+        zmin = max(zbounds[k,0],0.0001)  # Avoid z=0
         zmax = zbounds[k,1]
         n = int(np.floor( (zmax-zmin)/dzk)) + 1  # Number of z intervals to squeeze into kernel
         zk = np.linspace(zmin,zmax,n+1)

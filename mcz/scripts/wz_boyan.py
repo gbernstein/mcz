@@ -146,12 +146,12 @@ def run(startk, nk,
         boyanFile = 'boyan_100M_Sep2.h5',
         useRM=True,
         chunk=1000,
-        out = None):
+        outFile = None):
     '''Calculate log(p) of WZ measurements for each of samples in
     Boyan's 3sDir sample file.  Rows of Boyan's table to use are
     specified in `startk,nk`.  `useRM` determines whether to add
     RedMagic data to BOSS+QSO data.
-    Either writes to an output file given by `out`, or
+    Either writes to an output file given by `outFile`, or
     returns arrays of logp per sample, dlogp of last step, and b_u that optimize logp.'''
     
     # Split up the job if we have multiple tasks running under MPI
@@ -202,12 +202,12 @@ def run(startk, nk,
     logp = np.concatenate([o[0] for o in out])
     dlogp = np.concatenate([o[1] for o in out], axis=0)
     b_u = np.concatenate([o[2] for o in out], axis=0)
-    if out is None:
+    if outFile is None:
         # Return results
         return logp, dlogp, b_u
     else:
         # Save data to a file
-        np.savez(args.out + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp)
+        np.savez(outFile + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp)
 
 def go():
     # Collect arguments for function from command line
@@ -222,7 +222,7 @@ def go():
     print(args)
 
     print('Doing',args.startk, args.nk)
-    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, out=args.out)
+    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, outFile=args.out)
 
     sys.exit(0)
 
