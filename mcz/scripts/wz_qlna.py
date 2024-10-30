@@ -21,9 +21,9 @@ except:
 from importlib.resources import files
 
 pkg = files("mcz")
-bossFile = pkg / "data" / "Metadetect_BOSS_WZ_18sept.pickle"
-rmFile = pkg / "data" / "Metadetect_RM_WZ_18sept.pickle"
-qsoFile = pkg / "data" / "Metadetect_QSO_WZ_18sept.pickle"
+bossFile = pkg / "data" / "Metadetect_BOSS_WZ_15oct.pickle"
+rmFile = pkg / "data" / "Metadetect_RM_WZ_15oct.pickle"
+qsoFile = pkg / "data" / "Metadetect_QSO_WZ_15oct.pickle"
 wdmFile = pkg / "data" / "ccl_wdm.npz"
 
 def integrals(kernels, wzdata, wdmFile=wdmFile):
@@ -144,7 +144,7 @@ def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
     return logp_final, logp_final-logp, b_u
 
 def run(startk, nk,
-        boyanFile = 'boyan_100M_Sep2.h5',
+        boyanFile = 'boyan_100M_Oct2.h5',
         useRM=True,
         chunk=1000,
         dlna=None,

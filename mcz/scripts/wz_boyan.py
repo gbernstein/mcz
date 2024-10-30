@@ -20,9 +20,9 @@ except:
 from importlib.resources import files
 
 pkg = files("mcz")
-bossFile = pkg / "data" / "Metadetect_BOSS_WZ_18sept.pickle"
-rmFile = pkg / "data" / "Metadetect_RM_WZ_18sept.pickle"
-qsoFile = pkg / "data" / "Metadetect_QSO_WZ_18sept.pickle"
+bossFile = pkg / "data" / "Metadetect_BOSS_WZ_15oct.pickle"
+rmFile = pkg / "data" / "Metadetect_RM_WZ_15oct.pickle"
+qsoFile = pkg / "data" / "Metadetect_QSO_WZ_15oct.pickle"
 wdmFile = pkg / "data" / "ccl_wdm.npz"
 
 def integrals(kernels, wzdata, wdmFile=wdmFile):
@@ -85,7 +85,7 @@ def integrals(kernels, wzdata, wdmFile=wdmFile):
     return
 
 def _opt_blockR(f_um, wzdata, feedback=0.8, iterations=10,
-                b_u = jnp.array([0.9,1.2,1.4,1.3])):
+                b_u = jnp.array([0.73,1.06,1.17,0.76])):
     '''Do fixed number of iterations of very dumb Newton iteration
     on the b_u values, then return logp and b_u values.
     Version for block-R covW matrix.'''
@@ -115,7 +115,7 @@ def _opt_blockR(f_um, wzdata, feedback=0.8, iterations=10,
 
 
 def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
-          b_u = jnp.array([0.9,1.2,1.4,1.3])):
+          b_u = jnp.array([0.73,1.06,1.17,0.76])):
     '''Do fixed number of iterations of very dumb Newton iteration
     on the b_u values, then return logp and b_u values.
     Version for dense covW matrix.'''
@@ -143,7 +143,7 @@ def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
     return logp_final, logp_final-logp, b_u
 
 def run(startk, nk,
-        boyanFile = 'boyan_100M_Sep2.h5',
+        boyanFile = 'boyan_100M_Oct20.h5',
         useRM=True,
         chunk=1000,
         outFile = None):

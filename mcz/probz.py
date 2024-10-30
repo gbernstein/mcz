@@ -21,7 +21,7 @@ def evaluateKernel(kernel, coeff, z):
     Returns:
     Array of dimensions [...,nz] giving the dn/dz values at the redshifts.'''
     # Build the transformation matrix
-    m = jnp.array([ kernel(k,z) for k in range(kernel.nz)])]
+    m = jnp.array([ kernel(k,z) for k in range(kernel.nz)])
     # Apply
     return jnp.einsum('...i,ij->...j',coeff,m)
 
