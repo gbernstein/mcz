@@ -143,7 +143,7 @@ def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
     return logp_final, logp_final-logp, b_u
 
 def run(startk, nk,
-        boyanFile = 'boyan_100M_Oct20.h5',
+        boyanFile = 'boyan_100M_Nov5.h5',
         useRM=True,
         chunk=1000,
         outFile = None):
