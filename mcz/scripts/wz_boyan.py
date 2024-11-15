@@ -20,9 +20,6 @@ except:
 from importlib.resources import files
 
 pkg = files("mcz")
-bossFile = pkg / "data" / "Metadetect_BOSS_WZ_15oct.pickle"
-rmFile = pkg / "data" / "Metadetect_RM_WZ_15oct.pickle"
-qsoFile = pkg / "data" / "Metadetect_QSO_WZ_15oct.pickle"
 wdmFile = pkg / "data" / "ccl_wdm.npz"
 
 def integrals(kernels, wzdata, wdmFile=wdmFile):
@@ -182,15 +179,15 @@ def run(startk, nk,
     del pz
 
     # Open the WZ data files for BOSS and QSO
-    b = {k:jnp.array(v) for k,v in np.load('boss_18sep.npz').items()}
-    q = {k:jnp.array(v) for k,v in np.load('qso_18sep.npz').items()}
+    b = {k:jnp.array(v) for k,v in np.load('boss_15nov.npz').items()}
+    q = {k:jnp.array(v) for k,v in np.load('qso_15nov.npz').items()}
     integrals(pzK, [b,q])
 
     # Combine info from all spectro
     wz = mcz.concatenate_surveys(b,q)
     # Add RedMagic if desired:
     if useRM:
-        r = {k:jnp.array(v) for k,v in np.load('rm_18sep.npz').items()}
+        r = {k:jnp.array(v) for k,v in np.load('rm_15nov.npz').items()}
         # Compute cosmological integrals
         integrals(pzK, r)
         wz = mcz.concatenate_surveys(wz,r)
