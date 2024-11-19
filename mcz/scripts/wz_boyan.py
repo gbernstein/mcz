@@ -174,7 +174,8 @@ def run(startk, nk,
 
     # Make triangular kernel set                                                                                               
     zzz = np.array(pz['zbins'])
-    pzK = mcz.Tz(zzz[1]-zzz[0], len(zzz)-1, startz=zzz[0])
+    dz = zzz[1]-zzz[0]
+    pzK = mcz.Tz(dz, len(zzz)-1, z0=zzz[0]+dz/2)
     # Free memory and close HDF5 file
     del pz
 
@@ -213,7 +214,7 @@ def go():
     parser.add_argument('startk', help='First sample to use (in thousands)', type=int, default=0)
     parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
     parser.add_argument('--useRM', help='Include RedMagic WZ data or just BOSS+QSO?', action='store_true')
-    parser.add_argument('-c','--chunk', help='Samples per dispatch to GPU', type=int,default=1000)
+    parser.add_argument('-c','--chunk', help='Samples per dispatch to GPU', type=int,default=500)
     parser.add_argument('-o','--out', help='Output npz file prefix', type=str, default='boyan_wz')
     args = parser.parse_args()
     print(args)
