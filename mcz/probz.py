@@ -392,14 +392,15 @@ def prep_cov_w_blockR(cov_w):
     Sw = jnp.einsum('ru,rvu->uvr',s**(-0.5), U)  # indexed by (u, u',r) now.
     return Sw
 
-def w_model(f_um, b_u,  
+def w_model(f_um, b_u, b_u_nominal,
             s_uk, alpha_u,  ar, b_r,
             alpha_r_basis, Sys_kr,
             A_mr, Mu_mr, Mr_mr, **kwargs):
     '''Calculate model values for w_ur.
     `f_um`:       Fraction of galaxies from unknown set u that lie in redshift kernel k,
                   shape (Nu,Nk)
-    `b_u`:        Bias values for galaxies in u, shape (Nu)
+    `b_u`:        Bias values for galaxies in u, shape (Nu), multiplies the baseline
+    `b_u_nominal`: "baseline" bias function vs z, shape (Nu,Nr)
     `b_r`:        Bias values for reference galaxy subset r, shape (Nr)
     `alpha_u`:    Magnification coefficients for each unknown bin
     `ar`:         Coefficients defining alpha_r
@@ -415,9 +416,9 @@ def w_model(f_um, b_u,
                   shape (Nu,Nr).'''
 
     sys_ur = 1 + s_uk @ Sys_kr
-    w_ur = jnp.einsum('um,u,r,mr,ur->ur', f_um, b_u, b_r, A_mr, sys_ur) \
+    w_ur = jnp.einsum('um,u,r,mr,ur->ur', f_um, b_u, b_r, A_mr, sys_ur*b_u_nominal) \
          + jnp.einsum('um, r, u, mr->ur', f_um, b_r, alpha_u, Mu_mr) \
-         + jnp.einsum('um, ra, a, u, mr->ur', f_um, alpha_r_basis, ar, b_u, Mr_mr)
+         + jnp.einsum('um, ra, a, u, mr, ur->ur', f_um, alpha_r_basis, ar, b_u, Mr_mr, b_u_baseline)
     return w_ur
         
 def concatenate_surveys(s1,s2):
@@ -433,7 +434,7 @@ def concatenate_surveys(s1,s2):
         out[k] = jnp.concatenate( (s1[k], s2[k]), axis=0)
 
     # Concatenate on 2nd axis
-    for k in ('sigma_s_uk', 'w', 'A_mr', 'Mu_mr', 'Mr_mr'):
+    for k in ('sigma_s_uk', 'w', 'A_mr', 'Mu_mr', 'Mr_mr', 'b_u_baseline'):
         # Concatenate on the first axis
         out[k] = jnp.concatenate( (s1[k], s2[k]), axis=1)
 
@@ -493,7 +494,7 @@ def concatenate_surveys(s1,s2):
 
 ##################################
 
-def logpwz_dense(f_um, b_u,
+def logpwz_dense(f_um, b_u, b_u_nominal,
                  alpha_u0, sigma_alpha_u, 
                  b_r, alpha_r_basis, ar0, sigma_ar,
                  Sys_kr, sigma_s_uk, 
@@ -517,7 +518,8 @@ def logpwz_dense(f_um, b_u,
     Parameters:
     `f_um`:       Fraction of galaxies from unknown set u that lie in redshift kernel m,
                   shape (Nu,Nm)
-    `b_u`:        Bias values for galaxies in u, shape (Nu)
+    `b_u`:        Bias values for galaxies in u, shape (Nu), relative to nominal
+    `b_u_nominal`:Baseline bias values for galaxies in u, shape (Nu,Nr)
     `b_r`:        Bias values for reference galaxy subset r, shape (Nr)
     `alpha_u0, sigma_alpha_u`: Mean and sigma of Gaussian priors on magnification
                   coefficients of unknown sources bin u, shape (Nu) each.
@@ -563,9 +565,9 @@ def logpwz_dense(f_um, b_u,
 
     # w0 is the model for w evaluated at the mean values of the marginalized parameters q
     # w0_df is its derivs w.r.t. f_um:
-    w0_df = jnp.einsum('u,r,mr->urm',b_u,  b_r,A_mr) + \
+    w0_df = jnp.einsum('u,r,mr, ur->urm',b_u,  b_r,A_mr, b_u_nominal) + \
             jnp.einsum('u, r, mr->urm', alpha_u0, b_r, Mu_mr) + \
-            jnp.einsum('u, ra, a, mr->urm', b_u, alpha_r_basis, ar0, Mr_mr)    # indexed by [u,r,m]
+            jnp.einsum('u, ur, ra, a, mr->urm', b_u, b_u_nominal, alpha_r_basis, ar0, Mr_mr)    # indexed by [u,r,m]
 
     # Value:
     w0 = jnp.einsum('um,urm->ur',f_um, w0_df)  # indexed by [u,r]
@@ -590,7 +592,8 @@ def logpwz_dense(f_um, b_u,
     # diagonal on different combinations of indices
     # 
     # First the s_uk values.  Note duplication (diagonal) of u index in w_ur and s_uk
-    B0_df = jnp.einsum('uvsr,v,r,mr,kr,vk->uskvm',Sw,b_u, b_r, A_mr, Sys_kr,sigma_s_uk) # indexed by [u,r,k,u',m]
+    ##?
+    B0_df = jnp.einsum('uvsr,v, vr, r,mr,kr,vk->uskvm',Sw,b_u, b_u_nominal, b_r, A_mr, Sys_kr,sigma_s_uk) # indexed by [u,r,k,u',m] 
     # where u',m are the indices of the f_um derivative and (u',k) index the nuisance parameters s_uk.
     B0 = jnp.einsum('urkvm,vm->urvk',B0_df, f_um) # indexed by [u,r,u',k]  
 
@@ -599,7 +602,8 @@ def logpwz_dense(f_um, b_u,
     B1 = jnp.einsum('urvm,vm->urv',B1_df, f_um) # indexed by [u,r,u'] with u' indexing b_u
     
     # And the alpha_r terms
-    B2_df = jnp.einsum('uvsr,v,mr,ra, a->usavm',Sw,b_u, Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u',m]
+    ##?
+    B2_df = jnp.einsum('uvsr,v, vr, mr,ra, a->usavm',Sw,b_u, b_u_nominal, Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u',m]
     B2 = jnp.einsum('uravm,vm->ura',B2_df, f_um) # indexed by [u,r,a]
 
     # Concatenate the parts of B and put into 2d
@@ -687,16 +691,22 @@ def logpwz_dense(f_um, b_u,
         
     if return_dbu:
         # Derivs w.r.t. b_u
+        ##?
         w0_dbu = jnp.einsum('um,r,mr->ur', f_um,  b_r, A_mr) + \
                  jnp.einsum('um, ra, a, mr->ur', f_um, alpha_r_basis, ar0, Mr_mr)  # indexed by [u,r]
+        w0_dbu = w0_dbu * b_u_nominal
+
         Delta_dbu = jnp.einsum('uvrs,vs->urv',Sw,-w0_dbu)  # Indexed by [u,r,u'], where (u') indexes b_u ????
+        
         logp_dbu = -jnp.einsum('urv,ur->v',Delta_dbu, Delta)  # Vector over u of b_u
     
         # Fill in the parts of dB/du
-        B0_dbu = jnp.einsum('uvsr,vm,r,mr,kr,vk->uskv',Sw,f_um, b_r,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,k,u'],
+        ##?
+        B0_dbu = jnp.einsum('uvsr,vm,vr, r,mr,kr,vk->uskv',Sw,f_um, b_u_nominal, b_r,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,k,u'],
         # with u' indexing the b_u derivatives.
         # B1_dbu = 0.
-        B2_dbu = jnp.einsum('uvsr,vm,mr,ra,a->usav',Sw, f_um,Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u']
+
+        B2_dbu = jnp.einsum('uvsr,vm,vr, mr,ra,a->usav',Sw, f_um, b_u_nominal, Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u']
 
         B_dbu = jnp.zeros( (Nu,Nr,Nq,Nu), dtype=float)
         tmp = jnp.zeros( (Nu,Nr,Nu,Nk,Nu), dtype=float)
@@ -804,9 +814,9 @@ def logpwz_blockR(f_um, b_u,
 
     # w0 is the model for w evaluated at the mean values of the marginalized parameters q
     # w0_df is its derivs w.r.t. f_um:
-    w0_df = jnp.einsum('u,r,mr->urm',b_u,  b_r,A_mr) + \
+    w0_df = jnp.einsum('u,r,ur, mr->urm',b_u,  b_u_nominal, b_r,A_mr) + \
             jnp.einsum('u, r, mr->urm', alpha_u0, b_r, Mu_mr) + \
-            jnp.einsum('u, ra, a, mr->urm', b_u, alpha_r_basis, ar0, Mr_mr)    # indexed by [u,r,m]
+            jnp.einsum('u, ur, ra, a, mr->urm', b_u, b_u_nominal, alpha_r_basis, ar0, Mr_mr)    # indexed by [u,r,m]
 
 
     # Value:
@@ -832,7 +842,7 @@ def logpwz_blockR(f_um, b_u,
     # diagonal on different combinations of indices
     # 
     # First the s_uk values.  
-    B0_df = jnp.einsum('uvr,v,r,mr,kr,vk->urvkm',Sw,b_u, b_r, A_mr, Sys_kr,sigma_s_uk) # indexed by [u,r,u',k,m], 
+    B0_df = jnp.einsum('uvr,v,vr, r,mr,kr,vk->urvkm',Sw,b_u, b_u_nominal, b_r, A_mr, Sys_kr,sigma_s_uk) # indexed by [u,r,u',k,m], 
     B0 = jnp.einsum('urvkm,vm->urvk',B0_df, f_um) # indexed by [u,r,u',k] with (u',k) indexing s_uk
 
     # Next the alpha_u terms
@@ -842,7 +852,7 @@ def logpwz_blockR(f_um, b_u,
     # B1_dbu = 0.
     
     # And the alpha_r terms
-    B2_df = jnp.einsum('uvr,v,mr,ra, a->uravm',Sw,b_u, Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u',m]
+    B2_df = jnp.einsum('uvr,v,vr,mr,ra, a->uravm',Sw,b_u, b_u_nominal, Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u',m]
             # where (u,r) index w, (u'm) index f_um, and (a) indexes alpha_r
     B2 = jnp.einsum('uravm,vm->ura',B2_df, f_um) # indexed by [u,r,a], a indexes alpha_r freedoms
 
@@ -916,6 +926,8 @@ def logpwz_blockR(f_um, b_u,
         
         w0_dbu = jnp.einsum('um,r,mr->ur', f_um,  b_r, A_mr) + \
                  jnp.einsum('um, ra, a, mr->ur', f_um, alpha_r_basis, ar0, Mr_mr)  # indexed by [u,r]
+        w0_dbu = w0_dbu * b_u_nominal
+        
         Delta_dbu = jnp.einsum('uvr,vr->urv',Sw,-w0_dbu)  # Indexed by [u,r, u'], where (u) indexes w and u' indexes b_u
 
         ## Easiest term first: -Delta^T Delta_dbu 
@@ -925,9 +937,9 @@ def logpwz_blockR(f_um, b_u,
         logp_dbu = logp_dbu + jnp.einsum('q,qur,urv->v',LBTD, LBT, Delta_dbu)
 
         # Build L @ B^T_dbu from its 2 parts (B1_dbu = 0)
-        B0_dbu = jnp.einsum('uvr,vm,r,mr,kr,vk->urvk',Sw,f_um, b_r,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,u',k],
+        B0_dbu = jnp.einsum('uvr,vm,vr,r,mr,kr,vk->urvk',Sw,f_um, b_u_nominal, b_r,A_mr,Sys_kr,sigma_s_uk) # Indexed by [u,r,u',k],
                      # with (u,r) indexing w, and (u',k) indexing s_uk, and u' indexing b_u.
-        B2_dbu = jnp.einsum('uvr,vm,mr,ra,a->urav',Sw, f_um,Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u']
+        B2_dbu = jnp.einsum('uvr,vm,vr, mr,ra,a->urav',Sw, f_um, b_u_nominal, Mr_mr, alpha_r_basis, sigma_ar) # indexed by [u,r,a,u']
                      # where u' indexes b_u, a indexes ar.
         LBT_dbu = jnp.einsum('qvk,urvk->qurv',L[:,:N1].reshape(Nq,Nu,Nk),B0_dbu) \
                 + jnp.einsum('qa,urav->qurv',L[:,N2:],B2_dbu)
