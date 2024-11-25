@@ -28,3 +28,5 @@ license = {text = "BSD License"}
 
 [project.scripts]
 wz_boyan = "mcz.scripts.wz_boyan:go"
+wz_boyan_bu = "mcz.scripts.wz_boyan_bu:go"
+wz_boyan_bu = "mcz.scripts.wz_giulia_bu:go"

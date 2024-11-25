@@ -418,7 +418,7 @@ def w_model(f_um, b_u, b_u_nominal,
     sys_ur = 1 + s_uk @ Sys_kr
     w_ur = jnp.einsum('um,u,r,mr,ur->ur', f_um, b_u, b_r, A_mr, sys_ur*b_u_nominal) \
          + jnp.einsum('um, r, u, mr->ur', f_um, b_r, alpha_u, Mu_mr) \
-         + jnp.einsum('um, ra, a, u, mr, ur->ur', f_um, alpha_r_basis, ar, b_u, Mr_mr, b_u_baseline)
+         + jnp.einsum('um, ra, a, u, mr, ur->ur', f_um, alpha_r_basis, ar, b_u, Mr_mr, b_u_nominal)
     return w_ur
         
 def concatenate_surveys(s1,s2):
@@ -434,7 +434,7 @@ def concatenate_surveys(s1,s2):
         out[k] = jnp.concatenate( (s1[k], s2[k]), axis=0)
 
     # Concatenate on 2nd axis
-    for k in ('sigma_s_uk', 'w', 'A_mr', 'Mu_mr', 'Mr_mr', 'b_u_baseline'):
+    for k in ('sigma_s_uk', 'w', 'A_mr', 'Mu_mr', 'Mr_mr', 'b_u_nominal'):
         # Concatenate on the first axis
         out[k] = jnp.concatenate( (s1[k], s2[k]), axis=1)
 
@@ -744,7 +744,7 @@ def logpwz_dense(f_um, b_u, b_u_nominal,
     return out
 
 #######################################
-def logpwz_blockR(f_um, b_u,
+def logpwz_blockR(f_um, b_u, b_u_nominal,
                   alpha_u0, sigma_alpha_u, 
                   b_r, alpha_r_basis, ar0, sigma_ar,
                   Sys_kr, sigma_s_uk, 
@@ -768,7 +768,8 @@ def logpwz_blockR(f_um, b_u,
     Parameters:
     `f_um`:       Fraction of galaxies from unknown set u that lie in redshift kernel k,
                   shape (Nu,Nk)
-    `b_u`:        Bias values for galaxies in u, shape (Nu)
+    `b_u`:        Bias values for galaxies in u, shape (Nu), multiplies the baseline
+    `b_u_nominal`: "baseline" bias function vs z, shape (Nu,Nr)
     `b_r`:        Bias values for reference galaxy subset r, shape (Nr)
     `alpha_u0, sigma_alpha_u`: Mean and sigma of Gaussian priors on magnification
                   coefficients of unknown sources bin u, shape (Nu) each.
@@ -814,7 +815,7 @@ def logpwz_blockR(f_um, b_u,
 
     # w0 is the model for w evaluated at the mean values of the marginalized parameters q
     # w0_df is its derivs w.r.t. f_um:
-    w0_df = jnp.einsum('u,r,ur, mr->urm',b_u,  b_u_nominal, b_r,A_mr) + \
+    w0_df = jnp.einsum('u, ur, r, mr->urm',b_u,  b_u_nominal, b_r,A_mr) + \
             jnp.einsum('u, r, mr->urm', alpha_u0, b_r, Mu_mr) + \
             jnp.einsum('u, ur, ra, a, mr->urm', b_u, b_u_nominal, alpha_r_basis, ar0, Mr_mr)    # indexed by [u,r,m]
 
