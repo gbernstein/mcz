@@ -362,17 +362,28 @@ def prep_wz_integrals(kernels,
 
     return jnp.array(A), jnp.array(Mu), jnp.array(Mr)
 
-def prep_cov_w_dense(cov_w,Nu,Nr):
+def prep_cov_w_dense(cov_w,Nu,Nr, condition=None):
     '''Get the inverse square root of w covariance for each u, which is the form
     we need for logpwz (D_q^-1 * U^T_w in notes).
     This version assumes the cov matrix is fully populated and is
     provided as (Nu*Nr, Nu*Nr),
-    and Sw will be returned with shape (Nu,Nu,Nr,Nr)'''
+    and Sw will be returned with shape (Nu,Nu,Nr,Nr).
+    If `condition` is given, the inversion will require eigenvalues of
+    correlation matrix to be at least this number times largest
+    eigenvalue.
+    '''
     
     # Take eigenvals/vecs 
-    s,U = jnp.linalg.eigh(cov_w)
+    invsig = 1 / jnp.sqrt(jnp.diag(cov_w))
+    corr = invsig[:,np.newaxis] * invsig[np.newaxis,:] * cov_w
+    s,U = jnp.linalg.eigh(corr)
+    s_max = jnp.max(jnp.abs(s))
+    if condition is None:
+        sinvsqrt = s**(-0.5)
+    else:
+        sinvsqrt = jnp.where(np.abs(s) > condition*s_max, s**(-0.5), (condition*s_max)**(-0.5))
     # Sw is a "square root" of inverse of cov_w, so cov_w^{-1} = Sw.T @ Sw
-    Sw = jnp.einsum('r,sr->rs',s**(-0.5), U)  # indexed by (ur,u'r') now.
+    Sw = jnp.einsum('r,sr,s->rs',sinvsqrt, U, invsig)  # indexed by (ur,u'r') now.
     Sw = jnp.swapaxes(Sw.reshape(Nu,Nr,Nu,Nr),2,1) # Now indexed by (u,u',r,r')
     return Sw
 

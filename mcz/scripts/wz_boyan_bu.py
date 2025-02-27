@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# Calculate WZ likelihood for a single Maglim bin
 import numpy as np
 import mcz
 import jax
@@ -83,7 +82,7 @@ def integrals(kernels, wzdata, wdmFile=wdmFile):
     return
 
 def _opt_blockR(f_um, wzdata, feedback=0.8, iterations=10,
-                b_u = jnp.array([1.])):
+                b_u = jnp.array([0.73,1.06,1.17,0.76])):
     '''Do fixed number of iterations of very dumb Newton iteration
     on the b_u values, then return logp and b_u values.
     Version for block-R covW matrix.'''
@@ -113,7 +112,7 @@ def _opt_blockR(f_um, wzdata, feedback=0.8, iterations=10,
 
 
 def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
-          b_u = jnp.array([1.])):
+          b_u = jnp.array([0.73,1.06,1.17,0.76])):
     '''Do fixed number of iterations of very dumb Newton iteration
     on the b_u values, then return logp and b_u values.
     Version for dense covW matrix.'''
@@ -141,16 +140,23 @@ def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
     return logp_final, logp_final-logp, b_u
 
 def run(startk, nk,
-        giuliaFile = 'giulia_100M_Nov25.h5',
-        chunk=2000,
+        boyanFile = 'boyan_100M_Nov5.h5',
+        rmFile=None,
+        useQSO=True,
+        modes=None,
+        chunk=1000,
         outFile = None):
-    '''Calculate log(p) of WZ measurements for each of samples in one bin of
-    Giulia's 3sDir sample file.  Rows of Giulia's table to use are
-    specified in `startk,nk`. 
-    Uses just BOSS data.
+    '''Calculate log(p) of WZ measurements for each of samples in
+    Boyan's 3sDir sample file.  Rows of Boyan's table to use are
+    specified in `startk,nk`.  `rmFile` gives RM WZ data file, if any.
+    If `modes` is set, compression and decompression arrays will be read and
+    applied to all input n(z)'s.
     Either writes to an output file given by `outFile`, or
     returns arrays of logp per sample, dlogp of last step, and b_u that optimize logp.'''
     
+    bossFile = 'boss_21nov.npz'
+    qsoFile = 'qso_21nov.npz'
+
     # Split up the job if we have multiple tasks running under MPI
     rank = 0
     if useMPI:
@@ -163,50 +169,83 @@ def run(startk, nk,
         nk = min(nk, endk-startk)
         print('Rank',rank,'starting at',startk,'doing',nk)
 
-    opt_bu = jax.jit(jax.vmap(_opt_blockR, in_axes=(0,None), out_axes=0))
-    # Read the desired bin from Giulia's file
-    pz = h5py.File(giuliaFile)
+    # Read Boyan's files                                                                                                       
+    pz = h5py.File(boyanFile)
+    pzsamp = np.stack( [pz['bin{:d}'.format(i)][startk*1000:(startk+nk)*1000,:] for i in range(4)], axis = 1)
+    print('pzsamp shape', pzsamp.shape)
+
+    # Filter modes, if given
+    if modes is not None:
+        print('Projecting modes')
+        nn = np.load(modes)
+        U = nn['U']
+        X = nn['X']
+        mean = nn['mean']
+        ss = pzsamp.shape
+        pzsamp = np.einsum('ij,kj,lk->il',pzsamp.reshape([ss[0],-1])-mean,X,U) + mean
+        pzsamp = pzsamp.reshape(ss)
 
     # Make triangular kernel set                                                                                               
     zzz = np.array(pz['zbins'])
     dz = zzz[1]-zzz[0]
     pzK = mcz.Tz(dz, len(zzz)-1, z0=zzz[0]+dz/2)
+    # Free memory and close HDF5 file
+    del pz
 
-    for bin in range(6):
-        print('Starting bin',bin)
-        bossFile = 'maglim_bin{:d}_21nov.npz'.format(bin)
-        pzsamp = np.array( [pz['nz_bin{:d}'.format(bin)][startk*10000:(startk+nk)*10000,:]])
-        pzsamp = np.swapaxes(pzsamp,0,1)  # Put in order (sample, u, z)
+    # Open the WZ data files for BOSS, and QSO if wanted
+    b = {k:jnp.array(v) for k,v in np.load(bossFile).items()}
+    if useQSO:
+        q = {k:jnp.array(v) for k,v in np.load(qsoFile).items()}
+        integrals(pzK, [b,q])
+        # Combine info from all spectro
+        wz = mcz.concatenate_surveys(b,q)
+    else:
+        wz = b
+        integrals(pzK, b)
+    # Add RedMagic if desired:
+    if rmFile is not None:
+        r = {k:jnp.array(v) for k,v in np.load(rmFile).items()}
+        # Compute cosmological integrals
+        integrals(pzK, r)
+        wz = mcz.concatenate_surveys(wz,r)
 
-        print('pzsamp shape', pzsamp.shape)
+    if wz['Sw'].ndim>3:
+        # Need dense matrices
+        opt_bu = jax.jit(jax.vmap(_opt_dense, in_axes=(0,None), out_axes=0))
+    else:
+        opt_bu = jax.jit(jax.vmap(_opt_blockR, in_axes=(0,None), out_axes=0))
 
-        # Open the WZ data files for BOSS
-        wz = {k:jnp.array(v) for k,v in np.load(bossFile).items()}
-        integrals(pzK, wz)
-
-        out = []
-        for start in range(0,pzsamp.shape[0],chunk):
-            print('Start',start)
-            out.append(opt_bu(pzsamp[start:start+chunk], wz))
-        logp = np.concatenate([o[0] for o in out])
-        dlogp = np.concatenate([o[1] for o in out], axis=0)
-        b_u = np.concatenate([o[2] for o in out], axis=0)
-
+    out = []
+    for start in range(0,pzsamp.shape[0],chunk):
+        print('Start',start)
+        out.append(opt_bu(pzsamp[start:start+chunk], wz))
+    logp = np.concatenate([o[0] for o in out])
+    dlogp = np.concatenate([o[1] for o in out], axis=0)
+    b_u = np.concatenate([o[2] for o in out], axis=0)
+    if outFile is None:
+        # Return results
+        return logp, dlogp, b_u
+    else:
         # Save data to a file
-        np.savez(outFile + '_{:03d}_{:03d}_bin{:d}'.format(startk, nk,bin), logp=logp, b_u=b_u, dlogp=dlogp)
+        np.savez(outFile + '_{:03d}_{:03d}'.format(startk, nk), logp=logp, b_u=b_u, dlogp=dlogp)
 
 def go():
     # Collect arguments for function from command line
 
     parser = argparse.ArgumentParser(description='''Assign b_u-optimized WZ probabilities to 3sDir samples''')
     parser.add_argument('startk', help='First sample to use (in thousands)', type=int, default=0)
-    parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=300)
-    parser.add_argument('-c','--chunk', help='Samples per dispatch to GPU', type=int,default=2000)
-    parser.add_argument('-o','--out', help='Output npz file prefix', type=str, default='giulia_wz')
+    parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
+    parser.add_argument('--RM', help='File for RedMagic WZ data, if any', type=str) 
+    parser.add_argument('--useQSO', help='Include QSO WZ data?', action='store_true')
+    parser.add_argument('--modes', help='File containing  compression modes', type=str)
+    parser.add_argument('-c','--chunk', help='Samples per dispatch to GPU', type=int,default=500)
+    parser.add_argument('-o','--out', help='Output npz file prefix', type=str, default='boyan_wz')
     args = parser.parse_args()
+    print(args)
 
     print('Doing',args.startk, args.nk)
-    run(args.startk, args.nk, chunk=args.chunk, outFile=args.out)
+    run(args.startk, args.nk, rmFile=args.RM, useQSO=args.useQSO, chunk=args.chunk, outFile=args.out,
+        modes=args.modes)
 
     sys.exit(0)
 

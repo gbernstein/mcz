@@ -142,12 +142,15 @@ def _opt_dense(f_um, wzdata, feedback=0.8, iterations=10,
 def run(startk, nk,
         boyanFile = 'boyan_100M_Nov5.h5',
         useRM=True,
+        modes=None,
         chunk=1000,
         outFile = None):
     '''Calculate log(p) of WZ measurements for each of samples in
     Boyan's 3sDir sample file.  Rows of Boyan's table to use are
     specified in `startk,nk`.  `useRM` determines whether to add
     RedMagic data to BOSS+QSO data.
+    If `modes` is set, compression and decompression arrays will be read and
+    applied to all input n(z)'s.
     Either writes to an output file given by `outFile`, or
     returns arrays of logp per sample, dlogp of last step, and b_u that optimize logp.'''
     
@@ -171,6 +174,14 @@ def run(startk, nk,
     pz = h5py.File(boyanFile)
     pzsamp = np.stack( [pz['bin{:d}'.format(i)][startk*1000:(startk+nk)*1000,:] for i in range(4)], axis = 1)
     print('pzsamp shape', pzsamp.shape)
+
+    # Filter modes, if given
+    if modes is not None:
+        print('Projecting modes')
+        nn = np.load(modes)
+        U = nn['U']
+        X = nn['X']
+        pzsamp = np.einsum('ij,kj,lk->il',pzsamp,X,U)
 
     # Make triangular kernel set                                                                                               
     zzz = np.array(pz['zbins'])
@@ -214,13 +225,14 @@ def go():
     parser.add_argument('startk', help='First sample to use (in thousands)', type=int, default=0)
     parser.add_argument('nk', help='Number of samples to process (in thousands)', type=int, default=10)
     parser.add_argument('--useRM', help='Include RedMagic WZ data or just BOSS+QSO?', action='store_true')
+    parser.add_argument('--modes', help='File containing  compression modes', type='str')
     parser.add_argument('-c','--chunk', help='Samples per dispatch to GPU', type=int,default=500)
     parser.add_argument('-o','--out', help='Output npz file prefix', type=str, default='boyan_wz')
     args = parser.parse_args()
     print(args)
 
     print('Doing',args.startk, args.nk)
-    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, outFile=args.out)
+    run(args.startk, args.nk, useRM=args.useRM, chunk=args.chunk, outFile=args.out, modes=arg.modes)
 
     sys.exit(0)
 
